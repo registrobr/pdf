@@ -34,7 +34,7 @@ func (stk *Stack) Pop() Value {
 }
 
 func newDict() Value {
-	return Value{nil, objptr{}, make(dict)}
+	return Value{obj: Object{Kind: Dict, DictVal: make(map[string]Object)}, err: nil}
 }
 
 // Interpret interprets the content in a stream as a basic PostScript program,
@@ -50,50 +50,57 @@ func newDict() Value {
 // points to Unicode code points.
 //
 // There is no support for executable blocks, among other limitations.
-//
 func Interpret(strm Value, do func(stk *Stack, op string)) {
 	rd := strm.Reader()
-	b := newBuffer(rd, 0)
+	var enc int
+	if strm.r != nil {
+		enc = strm.r.encVersion
+	}
+	b := newBuffer(rd, 0, enc)
 	b.allowEOF = true
 	b.allowObjptr = false
 	b.allowStream = false
 	var stk Stack
-	var dicts []dict
+	var dicts []map[string]Object
 Reading:
 	for {
 		tok := b.readToken()
-		if tok == io.EOF {
-			break
+		if tok.Kind == Null { // EOF?
+			if b.eof {
+				break
+			}
 		}
-		if kw, ok := tok.(keyword); ok {
+
+		if tok.Kind == Keyword {
+			kw := tok.KeywordVal
 			switch kw {
 			case "null", "[", "]", "<<", ">>":
 				break
 			default:
 				for i := len(dicts) - 1; i >= 0; i-- {
-					if v, ok := dicts[i][name(kw)]; ok {
-						stk.Push(Value{nil, objptr{}, v})
+					if v, ok := dicts[i][kw]; ok {
+						stk.Push(Value{obj: v, err: nil})
 						continue Reading
 					}
 				}
-				do(&stk, string(kw))
+				do(&stk, kw)
 				continue
 			case "dict":
 				stk.Pop()
-				stk.Push(Value{nil, objptr{}, make(dict)})
+				stk.Push(Value{obj: Object{Kind: Dict, DictVal: make(map[string]Object)}, err: nil})
 				continue
 			case "currentdict":
 				if len(dicts) == 0 {
 					panic("no current dictionary")
 				}
-				stk.Push(Value{nil, objptr{}, dicts[len(dicts)-1]})
+				stk.Push(Value{obj: Object{Kind: Dict, DictVal: dicts[len(dicts)-1]}, err: nil})
 				continue
 			case "begin":
 				d := stk.Pop()
 				if d.Kind() != Dict {
 					panic("cannot begin non-dict")
 				}
-				dicts = append(dicts, d.data.(dict))
+				dicts = append(dicts, d.obj.DictVal)
 				continue
 			case "end":
 				if len(dicts) <= 0 {
@@ -106,11 +113,12 @@ Reading:
 					panic("def without open dict")
 				}
 				val := stk.Pop()
-				key, ok := stk.Pop().data.(name)
-				if !ok {
+				keyObj := stk.Pop()
+				if keyObj.Kind() != Name {
 					panic("def of non-name")
 				}
-				dicts[len(dicts)-1][key] = val.data
+				key := keyObj.Name()
+				dicts[len(dicts)-1][key] = val.obj
 				continue
 			case "pop":
 				stk.Pop()
@@ -119,7 +127,7 @@ Reading:
 		}
 		b.unreadToken(tok)
 		obj := b.readObject()
-		stk.Push(Value{nil, objptr{}, obj})
+		stk.Push(Value{obj: obj, ptr: objptr{}, err: nil})
 	}
 }
 

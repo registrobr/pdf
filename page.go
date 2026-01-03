@@ -403,7 +403,17 @@ type gstate struct {
 }
 
 // Content returns the page's content.
-func (p Page) Content() Content {
+// It recovers from panics caused by malformed content streams and returns
+// an empty Content in such cases for security and robustness.
+func (p Page) Content() (result Content) {
+	// Security: recover from panics in malformed content streams
+	defer func() {
+		if r := recover(); r != nil {
+			// Return empty content on malformed input
+			result = Content{}
+		}
+	}()
+
 	strm := p.V.Key("Contents")
 	var enc TextEncoding = &nopEncoder{}
 
