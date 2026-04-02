@@ -7,7 +7,6 @@ package pdf
 import (
 	"bytes"
 	"io"
-	"io/ioutil"
 	"sort"
 )
 
@@ -156,7 +155,7 @@ func (v Value) Reader() io.ReadCloser {
 	if v.obj.Kind == Stream {
 		return newStreamReader(v.obj, v.r)
 	}
-	return ioutil.NopCloser(bytes.NewReader(nil))
+	return io.NopCloser(bytes.NewReader(nil))
 }
 
 // Data returns the raw data of the stream v.
