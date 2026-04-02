@@ -11,7 +11,7 @@ func TestReadToken(t *testing.T) {
 		name     string
 		input    string
 		wantKind Kind
-		wantVal  interface{}
+		wantVal  any
 	}{
 		{"Integer", "123 ", Integer, int64(123)},
 		{"NegativeInteger", "-456 ", Integer, int64(-456)},

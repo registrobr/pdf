@@ -28,7 +28,7 @@ const (
 	Keyword  // Internal: obj, endobj, etc.
 )
 
-// Object represents a PDF object using a tagged union approach to avoid interface{} boxing.
+// Object represents a PDF object using a tagged union approach to avoid any boxing.
 type Object struct {
 	Kind         Kind
 	BoolVal      bool

@@ -87,7 +87,7 @@ func GetDict() Object {
 	return Object{Kind: Dict, DictVal: make(map[string]Object)}
 }
 
-func (r *Reader) errorf(format string, args ...interface{}) {
+func (r *Reader) errorf(format string, args ...any) {
 	panic(fmt.Errorf(format, args...))
 }
 

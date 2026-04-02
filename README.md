@@ -7,7 +7,7 @@ This library has been extensively refactored to support modern PDF standards and
 ## Key Improvements
 
 ### 1. High-Performance Zero-Allocation AST
-The internal Abstract Syntax Tree (AST) has been rewritten to use a rigid `Object` union struct instead of `interface{}`. This eliminates the overhead of interface boxing for every PDF object (integers, names, strings, etc.), leading to massive reductions in memory allocations and GC pressure.
+The internal Abstract Syntax Tree (AST) has been rewritten to use a rigid `Object` union struct instead of `any`. This eliminates the overhead of interface boxing for every PDF object (integers, names, strings, etc.), leading to massive reductions in memory allocations and GC pressure.
 
 ### 2. Modern Security Support
 Added comprehensive support for encrypted PDFs:
