@@ -230,7 +230,7 @@ func testPDFReaderAt(t *testing.T, ra io.ReaderAt, size int64, name string, expe
 		pageNum := i
 		safeCall(t, name, fmt.Sprintf("Page(%d)", pageNum), func() {
 			page := r.Page(pageNum)
-			if page.V.Kind() == Null {
+			if page.Kind() == Null {
 				return
 			}
 
