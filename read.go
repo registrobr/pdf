@@ -829,6 +829,16 @@ func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
 	switch name {
 	default:
 		return nil, fmt.Errorf("unknown filter %s", name)
+	// Used for JPEG; no need to decode
+	case "DCTDecode":
+		return rd, nil
+	case "JBIG2Decode":
+		fmt.Println("Warning: JBIG2 image detected, not supported yet, some images will not be saved correctly!")
+		// TODO: create a reader based on page 31 of PDF spec
+		return rd, nil
+	// Used for JPEG2000; no need to decode
+	case "JPXDecode":
+		return rd, nil
 	case "ASCIIHexDecode":
 		return asciiHexReader{rd}, nil
 	case "ASCII85Decode":
