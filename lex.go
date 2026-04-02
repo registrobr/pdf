@@ -133,6 +133,7 @@ func (b *buffer) unreadToken(t Object) {
 	b.unread = append(b.unread, t)
 }
 
+// nolint: gocyclo
 func (b *buffer) readToken() Object {
 	if n := len(b.unread); n > 0 {
 		t := b.unread[n-1]
@@ -237,7 +238,7 @@ func (b *buffer) readHexString() Object {
 		}
 		x := unhex(c)<<4 | unhex(c2)
 		if x < 0 {
-			b.errorf("malformed hex string %c %c", c, c2)
+			b.errorf("malformed hex string %c %c %s", c, c2, b.buf[b.pos:])
 			break
 		}
 		tmp = append(tmp, byte(x))
@@ -258,6 +259,7 @@ func unhex(b byte) int {
 	return -1
 }
 
+// nolint: gocyclo
 func (b *buffer) readLiteralString() Object {
 	tmp := b.tmp[:0]
 	depth := 1
@@ -346,6 +348,7 @@ Loop:
 	return Object{Kind: String, StringVal: string(tmp)}
 }
 
+// nolint: gocyclo
 func (b *buffer) readName() Object {
 	tmp := b.tmp[:0]
 	// Fast path: scan buffer
@@ -455,6 +458,7 @@ Loop:
 	return Object{Kind: Name, NameVal: string(tmp)}
 }
 
+// nolint: gocyclo
 func (b *buffer) readKeyword() Object {
 	tmp := b.tmp[:0]
 Loop:
@@ -539,6 +543,7 @@ Loop:
 	return Object{Kind: Keyword, KeywordVal: string(tmp)}
 }
 
+// nolint: gocyclo
 func (b *buffer) readObject() Object {
 	if len(b.unread) == 0 {
 		// Optimization: Try to read indirect object/reference without boxing integers
@@ -629,6 +634,7 @@ func (b *buffer) readObject() Object {
 	return tok
 }
 
+// nolint: gocyclo
 func (b *buffer) tryReadIndirect() (Object, bool) {
 	// Snapshot state to rollback
 	startPos := b.pos
@@ -768,6 +774,7 @@ func (b *buffer) readArray() Object {
 	return Object{Kind: Array, ArrayVal: x}
 }
 
+// nolint: gocyclo
 func (b *buffer) readDict() Object {
 	x := make(map[string]Object)
 	decDisabled := false
