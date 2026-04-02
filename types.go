@@ -6,6 +6,7 @@ package pdf
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"sort"
 )
@@ -152,10 +153,22 @@ func (v Value) Reader() io.ReadCloser {
 	if v.err != nil {
 		return &errorReadCloser{v.err}
 	}
+	if v.obj.Kind == Array {
+		var sb bytes.Buffer
+		for i := 0; i < v.Len(); i++ {
+			r := newStreamReader(v.Index(i).obj, v.r)
+			if b, err := io.ReadAll(r); err == nil {
+				sb.Write(b)
+			} else {
+				return &errorReadCloser{err}
+			}
+		}
+		return io.NopCloser(&sb)
+	}
 	if v.obj.Kind == Stream {
 		return newStreamReader(v.obj, v.r)
 	}
-	return io.NopCloser(bytes.NewReader(nil))
+	return &errorReadCloser{fmt.Errorf("stream not present")}
 }
 
 // Data returns the raw data of the stream v.
