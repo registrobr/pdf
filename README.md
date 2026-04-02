@@ -36,7 +36,7 @@ Throughput comparison against the original library (parsing standard documents):
 ## Usage
 
 ```go
-import "github.com/digitorus/pdf"
+import "github.com/registrobr/pdf"
 
 r, err := pdf.NewReader(file, size)
 if err != nil {
