@@ -11,7 +11,7 @@ import (
 
 func TestCryptKey(t *testing.T) {
 	key := []byte("secret")
-	ptr := objptr{id: 10, gen: 0}
+	ptr := Objptr{id: 10, gen: 0}
 
 	ck1 := cryptKey(key, false, ptr)
 	ck2 := cryptKey(key, false, ptr)
@@ -27,7 +27,7 @@ func TestCryptKey(t *testing.T) {
 
 func TestDecryptStringRC4(t *testing.T) {
 	key := []byte("testkey")
-	ptr := objptr{id: 5, gen: 0}
+	ptr := Objptr{id: 5, gen: 0}
 	data := "Hello PDF"
 
 	// Encrypt manually using rc4 logic from read.go
@@ -42,7 +42,7 @@ func TestDecryptStringRC4(t *testing.T) {
 
 func TestDecryptStringAES(t *testing.T) {
 	key := make([]byte, 16) // 128-bit key
-	ptr := objptr{id: 1, gen: 0}
+	ptr := Objptr{id: 1, gen: 0}
 
 	// Create valid AES-CBC encrypted block with padding
 	// 16 bytes IV + data
@@ -104,7 +104,7 @@ func TestAuthenticateV5(t *testing.T) {
 
 func TestDecryptStream(t *testing.T) {
 	key := make([]byte, 16)
-	ptr := objptr{id: 1, gen: 0}
+	ptr := Objptr{id: 1, gen: 0}
 
 	data := []byte("0123456789ABCDEF") // 16 bytes, exactly one block
 	// For simplicity, test with V5 logic (no crpytKey)

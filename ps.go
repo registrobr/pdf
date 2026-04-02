@@ -127,7 +127,7 @@ Reading:
 		}
 		b.unreadToken(tok)
 		obj := b.readObject()
-		stk.Push(Value{obj: obj, ptr: objptr{}, err: nil})
+		stk.Push(Value{obj: obj, ptr: Objptr{}, err: nil})
 	}
 }
 

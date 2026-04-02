@@ -30,7 +30,7 @@ type buffer struct {
 	key         []byte
 	useAES      bool
 	encVersion  int
-	objptr      objptr
+	objptr      Objptr
 	line        int
 }
 
@@ -58,18 +58,19 @@ func newBuffer(r io.Reader, offset int64, encVersion int) *buffer {
 	b.key = nil
 	b.useAES = false
 	b.encVersion = encVersion
-	b.objptr = objptr{}
+	b.objptr = Objptr{}
 	b.line = 1
 	return b
 }
 
+/*
 func (b *buffer) seek(offset int64) {
 	b.offset = offset
 	b.buf = b.buf[:0]
 	b.pos = 0
 	b.realPos = 0
 	b.unread = b.unread[:0]
-}
+}*/
 
 func (b *buffer) readByte() byte {
 	if b.pos >= len(b.buf) {
@@ -568,9 +569,11 @@ func (b *buffer) readObject() Object {
 	}
 
 	if tok.Kind == String && b.key != nil && b.objptr.id != 0 {
+		var decrypted string
+		var err error
 		if !b.decDisabled {
 			str := tok.StringVal
-			decrypted, err := decryptString(b.key, b.useAES, b.encVersion, b.objptr, str)
+			decrypted, err = decryptString(b.key, b.useAES, b.encVersion, b.objptr, str)
 			if err != nil {
 				panic(err)
 			}
@@ -595,10 +598,10 @@ func (b *buffer) readObject() Object {
 					if tok3.Kind == Keyword {
 						switch tok3.KeywordVal {
 						case "R":
-							return Object{Kind: Indirect, PtrVal: objptr{uint32(t1), uint16(t2)}}
+							return Object{Kind: Indirect, PtrVal: Objptr{uint32(t1), uint16(t2)}}
 						case "obj":
 							old := b.objptr
-							b.objptr = objptr{uint32(t1), uint16(t2)}
+							b.objptr = Objptr{uint32(t1), uint16(t2)}
 							obj := b.readObject()
 							if obj.Kind != Stream {
 								tok4 := b.readToken()
@@ -610,7 +613,7 @@ func (b *buffer) readObject() Object {
 							b.objptr = old
 							// Re-use PtrVal for definition ID
 							res := obj
-							res.PtrVal = objptr{uint32(t1), uint16(t2)}
+							res.PtrVal = Objptr{uint32(t1), uint16(t2)}
 							return res
 						}
 					}
@@ -709,7 +712,7 @@ func (b *buffer) tryReadIndirect() (Object, bool) {
 		}
 		b.pos++
 		b.realPos++
-		return Object{Kind: Indirect, PtrVal: objptr{uint32(i1), uint16(i2)}}, true
+		return Object{Kind: Indirect, PtrVal: Objptr{uint32(i1), uint16(i2)}}, true
 	} else if c == 'o' {
 		if b.pos+2 < len(b.buf) && b.buf[b.pos+1] == 'b' && b.buf[b.pos+2] == 'j' {
 			// obj
@@ -723,7 +726,7 @@ func (b *buffer) tryReadIndirect() (Object, bool) {
 			b.realPos += 3
 
 			old := b.objptr
-			b.objptr = objptr{uint32(i1), uint16(i2)}
+			b.objptr = Objptr{uint32(i1), uint16(i2)}
 			obj := b.readObject()
 
 			if obj.Kind != Stream {
@@ -735,7 +738,7 @@ func (b *buffer) tryReadIndirect() (Object, bool) {
 			}
 			b.objptr = old
 			// Reuse PtrVal for definition ID
-			obj.PtrVal = objptr{uint32(i1), uint16(i2)}
+			obj.PtrVal = Objptr{uint32(i1), uint16(i2)}
 			return obj, true
 		}
 	}
@@ -786,12 +789,12 @@ func (b *buffer) readDict() Object {
 		if decDisabled && (n == "Contents" || n == "ByteRange") {
 			b.decDisabled = true
 		}
-		
+
 		x[n] = b.readObject()
 
 		b.decDisabled = false
 
-		if n == "Type" && x[n] == "Sig" {
+		if n == "Type" && x[n].NameVal == "Sig" {
 			decDisabled = true
 		}
 	}

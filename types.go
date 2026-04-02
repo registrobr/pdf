@@ -39,25 +39,25 @@ type Object struct {
 	KeywordVal   string
 	ArrayVal     []Object
 	DictVal      map[string]Object
-	PtrVal       objptr
+	PtrVal       Objptr
 	StreamOffset int64 // For Stream, DictVal holds the header
 }
 
 // Internal types
-type objptr struct {
+type Objptr struct {
 	id  uint32
 	gen uint16
 }
 
 type objdef struct {
-	ptr objptr
+	ptr Objptr
 	obj Object
 }
 
 // A Value represents a value in a PDF file.
 type Value struct {
 	r   *Reader // the reader, for resolving references
-	ptr objptr  // the pointer to the object, if any
+	ptr Objptr  // the pointer to the object, if any
 	obj Object  // the actual data
 	err error   // if non-nil, the error that occurred during resolution or access
 }
@@ -266,7 +266,7 @@ func (v Value) Header() Value {
 			Kind:    Dict,
 			DictVal: v.obj.DictVal,
 		}
-		return v.r.createValue(objptr{}, hdrObj)
+		return v.r.createValue(Objptr{}, hdrObj)
 	}
 	return Value{}
 }

@@ -9,9 +9,9 @@ import (
 func TestReaderPage(t *testing.T) {
 	// Mock cross-references
 	xref := []xref{
-		{ptr: objptr{id: 0, gen: 0}}, // 0
-		{ptr: objptr{id: 1, gen: 0}}, // Pages
-		{ptr: objptr{id: 2, gen: 0}}, // Page 1
+		{ptr: Objptr{id: 0, gen: 0}}, // 0
+		{ptr: Objptr{id: 1, gen: 0}}, // Pages
+		{ptr: Objptr{id: 2, gen: 0}}, // Page 1
 	}
 
 	r := &Reader{
@@ -25,12 +25,12 @@ func TestReaderPage(t *testing.T) {
 
 	pages.DictVal["Type"] = Object{Kind: Name, NameVal: "Pages"}
 	pages.DictVal["Count"] = Object{Kind: Integer, Int64Val: 1}
-	pages.DictVal["Kids"] = Object{Kind: Array, ArrayVal: []Object{{Kind: Indirect, PtrVal: objptr{id: 2}}}}
+	pages.DictVal["Kids"] = Object{Kind: Array, ArrayVal: []Object{{Kind: Indirect, PtrVal: Objptr{id: 2}}}}
 
 	page1.DictVal["Type"] = Object{Kind: Name, NameVal: "Page"}
-	page1.DictVal["Parent"] = Object{Kind: Indirect, PtrVal: objptr{id: 1}}
+	page1.DictVal["Parent"] = Object{Kind: Indirect, PtrVal: Objptr{id: 1}}
 
-	root.DictVal["Pages"] = Object{Kind: Indirect, PtrVal: objptr{id: 1}}
+	root.DictVal["Pages"] = Object{Kind: Indirect, PtrVal: Objptr{id: 1}}
 	r.trailer = Object{Kind: Dict, DictVal: map[string]Object{"Root": root}}
 
 	// We need r.GetObject to work for these IDs.

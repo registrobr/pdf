@@ -130,7 +130,7 @@ func TestArray(t *testing.T) {
 }
 
 func TestValuePtrAccessors(t *testing.T) {
-	ptr := objptr{id: 5, gen: 2}
+	ptr := Objptr{id: 5, gen: 2}
 	v := Value{ptr: ptr}
 
 	if v.GetPtr().GetID() != 5 {
@@ -171,7 +171,7 @@ func TestValueString(t *testing.T) {
 		{Value{obj: Object{Kind: Real, Float64Val: 3.14}}, "3.14"},
 		{Value{obj: Object{Kind: Name, NameVal: "Type"}}, "/Type"},
 		{Value{obj: Object{Kind: String, StringVal: "hello"}}, "(hello)"},
-		{Value{obj: Object{Kind: Indirect, PtrVal: objptr{id: 1, gen: 0}}}, "1 0 R"},
+		{Value{obj: Object{Kind: Indirect, PtrVal: Objptr{id: 1, gen: 0}}}, "1 0 R"},
 		{Value{obj: Object{Kind: Dict, DictVal: map[string]Object{"A": {Kind: Integer, Int64Val: 1}}}}, "<</A 1>>"},
 		{Value{obj: Object{Kind: Array, ArrayVal: []Object{{Kind: Integer, Int64Val: 1}}}}, "[1]"},
 		{Value{obj: Object{Kind: Stream, StreamOffset: 123}}, "<<>>@123"},
