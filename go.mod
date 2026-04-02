@@ -1,3 +1,3 @@
-module github.com/digitorus/pdf
+module github.com/registrobr/pdf
 
 go 1.23
