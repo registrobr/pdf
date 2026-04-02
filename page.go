@@ -12,7 +12,9 @@ import (
 // A Page represent a single page in a PDF file.
 // The methods interpret a Page dictionary stored in V.
 type Page struct {
-	V Value
+	Value
+	logger   LoggerFunc
+	xobjects map[string]struct{}
 }
 
 // Page returns the page for the given page number.
@@ -41,7 +43,10 @@ Search:
 			}
 			if kid.Key("Type").Name() == "Page" {
 				if num == 0 {
-					return Page{kid}
+					return Page{
+						Value:  kid,
+						logger: r.logger,
+					}
 				}
 				num--
 			}
@@ -57,7 +62,7 @@ func (r *Reader) NumPage() int {
 }
 
 func (p Page) findInherited(key string) Value {
-	for v := p.V; !v.IsNull(); v = v.Key("Parent") {
+	for v := p.Value; !v.IsNull(); v = v.Key("Parent") {
 		if r := v.Key(key); !r.IsNull() {
 			return r
 		}
@@ -143,8 +148,7 @@ func (f Font) Encoder() TextEncoding {
 		case "MacRomanEncoding":
 			return &byteEncoder{&macRomanEncoding}
 		case "Identity-H":
-			// TODO: Should be big-endian UCS-2 decoder
-			return &nopEncoder{}
+			// ok, try ToUnicode
 		default:
 			println("unknown encoding", enc.Name())
 			return &nopEncoder{}
@@ -159,7 +163,8 @@ func (f Font) Encoder() TextEncoding {
 	}
 
 	toUnicode := f.V.Key("ToUnicode")
-	if toUnicode.Kind() == Dict {
+	k := toUnicode.Kind()
+	if k == Dict || k == Stream {
 		m := readCmap(toUnicode)
 		if m == nil {
 			return &nopEncoder{}
@@ -229,12 +234,24 @@ func (e *byteEncoder) Decode(raw string) (text string) {
 }
 
 type cmap struct {
-	space   [4][][2]string
-	bfrange []bfrange
+	space         [4][][2]string
+	bfrange       []bfrange
+	bfchar        map[int]string
+	bfcharKeySize int
 }
 
+// nolint: gocyclo
 func (m *cmap) Decode(raw string) (text string) {
 	var r []rune
+
+	if m.bfchar != nil {
+		for i := 0; i < len(raw); i += m.bfcharKeySize {
+			key := strToInt(raw[i : i+m.bfcharKeySize])
+			r = append(r, []rune(m.bfchar[key])...)
+		}
+		return string(r)
+	}
+
 Parse:
 	for len(raw) > 0 {
 		for n := 1; n <= 4 && n <= len(raw); n++ {
@@ -282,8 +299,10 @@ type bfrange struct {
 	dst Value
 }
 
-func readCmap(toUnicode Value) *cmap {
+// nolint: gocyclo
+func readCmap(toUnicode Value) TextEncoding {
 	n := -1
+	s := -1
 	var m cmap
 	ok := true
 	Interpret(toUnicode, func(stk *Stack, op string) {
@@ -292,14 +311,37 @@ func readCmap(toUnicode Value) *cmap {
 		}
 		switch op {
 		case "findresource":
-			category := stk.Pop()
-			key := stk.Pop()
-			fmt.Println("findresource", key, category)
+			stk.Pop()
+			stk.Pop()
+			//fmt.Println("findresource", key, category)
 			stk.Push(newDict())
 		case "begincmap":
 			stk.Push(newDict())
 		case "endcmap":
 			stk.Pop()
+		case "beginbfchar":
+			s = int(stk.Pop().Int64())
+		case "endbfchar":
+			if s < 0 {
+				println("missing beginbfchar")
+				ok = false
+				return
+			}
+			m.bfchar = make(map[int]string)
+			for i := 0; i < s; i++ {
+				hiStr, loStr := stk.Pop().RawString(), stk.Pop().RawString()
+				if len(loStr) > 2 || len(hiStr) > 2 {
+					fmt.Printf("bad char element [%d] [%d]\n", strToInt(loStr), strToInt(hiStr))
+					ok = false
+					return
+				}
+				m.bfcharKeySize = len(loStr)
+				r := rune(strToInt(hiStr))
+				// fmt.Printf("[%d] => [%c]\n", strToInt(loStr), r)
+				m.bfchar[strToInt(loStr)] = string(r)
+			}
+			s = -1
+
 		case "begincodespacerange":
 			n = int(stk.Pop().Int64())
 		case "endcodespacerange":
@@ -326,22 +368,54 @@ func readCmap(toUnicode Value) *cmap {
 			}
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
-				m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
+				if dst.Kind() == Array {
+					// Expand array
+					l := strToInt(srcLo)
+					h := strToInt(srcHi)
+					if h-l+1 <= dst.Len() {
+						for i := 0; i < dst.Len(); i++ {
+							idx := intToStr(l + i)
+							m.bfrange = append(m.bfrange, bfrange{idx, idx, dst.Index(i)})
+						}
+					}
+					//fmt.Printf("%+v %+v\n", l, h)
+
+				} else {
+					m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
+				}
 			}
+
 		case "defineresource":
-			category := stk.Pop().Name()
+			stk.Pop()
 			value := stk.Pop()
-			key := stk.Pop().Name()
-			fmt.Println("defineresource", key, value, category)
+			stk.Pop()
+			//fmt.Println("defineresource", key, value, category)
 			stk.Push(value)
 		default:
-			println("interp\t", op)
+			//println("interp\t", op)
 		}
 	})
 	if !ok {
 		return nil
 	}
 	return &m
+}
+
+func strToInt(s string) int {
+	b := []byte(s)
+	if len(b) > 1 {
+		return int(b[0])<<8 | int(b[1])
+	} else if len(b) > 0 {
+		return int(b[0])
+	}
+	return 0
+}
+
+func intToStr(i int) string {
+	var b []byte
+	b = append(b, byte(i>>8%0xff))
+	b = append(b, byte(i%0xff))
+	return string(b)
 }
 
 type matrix [3][3]float64
@@ -403,9 +477,18 @@ type gstate struct {
 }
 
 // Content returns the page's content.
+func (p Page) Content() Content {
+	p.xobjects = make(map[string]struct{})
+	strm := p.Key("Contents")
+	response := p.contentStream(strm)
+
+	return response
+}
+
 // It recovers from panics caused by malformed content streams and returns
 // an empty Content in such cases for security and robustness.
-func (p Page) Content() (result Content) {
+// nolint: gocyclo
+func (p *Page) contentStream(strm Value) (result Content) {
 	// Security: recover from panics in malformed content streams
 	defer func() {
 		if r := recover(); r != nil {
@@ -414,7 +497,6 @@ func (p Page) Content() (result Content) {
 		}
 	}()
 
-	strm := p.V.Key("Contents")
 	var enc TextEncoding = &nopEncoder{}
 
 	var g = gstate{
@@ -427,15 +509,21 @@ func (p Page) Content() (result Content) {
 		n := 0
 		for _, ch := range enc.Decode(s) {
 			Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
-			w0 := g.Tf.Width(int(s[n]))
-			n++
-			if ch != ' ' {
-				f := g.Tf.BaseFont()
-				if i := strings.Index(f, "+"); i >= 0 {
-					f = f[i+1:]
-				}
-				text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
+			var w0 float64
+			if g.Tf.FirstChar() != 0 {
+				w0 = g.Tf.Width(int(s[n]))
+			} else {
+				w0 = 1.0
 			}
+			n++
+			//if ch != ' ' {
+			f := g.Tf.BaseFont()
+			if i := strings.Index(f, "+"); i >= 0 {
+				f = f[i+1:]
+			}
+			text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
+			//}
+			//p.logger("%f %f", text[len(text)-1].X, text[len(text)-1].Y)
 			tx := w0/1000*g.Tfs + g.Tc
 			if ch == ' ' {
 				tx += g.Tw
@@ -453,9 +541,10 @@ func (p Page) Content() (result Content) {
 		for i := n - 1; i >= 0; i-- {
 			args[i] = stk.Pop()
 		}
+		// p.logger("   %s %+v", op, args)
 		switch op {
 		default:
-			//fmt.Println(op, args)
+			// p.logger("ig %s %s", op, args)
 			return
 
 		case "cm": // update g.CTM
@@ -470,18 +559,45 @@ func (p Page) Content() (result Content) {
 			g.CTM = m.mul(g.CTM)
 
 		case "gs": // set parameters from graphics state resource
+		/*
 			gs := p.Resources().Key("ExtGState").Key(args[0].Name())
 			font := gs.Key("Font")
 			if font.Kind() == Array && font.Len() == 2 {
-				//fmt.Println("FONT", font)
+				fmt.Println("FONT", font)
 			}
-
+		*/
+		case "c": // Append curved segment to path (three control points)
+		case "d": // Set line dash pattern
 		case "f": // fill
 		case "g": // setgray
+		case "h": // Close subpath
+		case "j": // Set line join style
 		case "l": // lineto
 		case "m": // moveto
+		case "n": // End path without filling or stroking
+		case "w": // Set line width
+
+		case "J": // Set line cap style
+		case "M": // Set miter limit
+		case "S": // Stroke path
+		case "W": // Set clipping path using non-zero winding number rule
+		case "W*": // Set clipping path using non-zero winding number rule
 
 		case "cs": // set colorspace non-stroking
+		case "Do": // Invoke named XObject
+			name := strings.TrimPrefix(args[0].String(), "/")
+			v := p.Key("Resources").Key("XObject").Key(name)
+			if _, found := p.xobjects[name]; !found && v.Kind() == Stream && v.Key("Subtype").Name() == "Form" {
+				p.xobjects[name] = struct{}{}
+				item := p.contentStream(v)
+				rect = append(rect, item.Rect...)
+				text = append(text, item.Text...)
+				delete(p.xobjects, name)
+			}
+
+		case "RG": // Set RGB colour for stroking operations
+		case "rg": // Set RGB colour for nonstroking operations
+		case "SCN": // (PDF 1.2) Set colour for stroking operations (ICCBased and special colour spaces)
 		case "scn": // set color non-stroking
 
 		case "re": // append rectangle to path
@@ -497,9 +613,13 @@ func (p Page) Content() (result Content) {
 		case "Q": // restore graphics state
 			n := len(gstack) - 1
 			if n >= 0 {
-			    g = gstack[n]
-			    gstack = gstack[:n]
+				g = gstack[n]
+				gstack = gstack[:n]
 			}
+
+		case "BDC": // Begin a marked-content sequence terminated by a balancing EMC operator.
+			//p.logger("   BDC %d %s %s", len(args), args[0], args[1])
+		case "EMC": // End a marked-content sequence begun by a BMC or BDC operator.
 
 		case "BT": // begin text (reset text matrix and line matrix)
 			g.Tm = ident
@@ -524,6 +644,7 @@ func (p Page) Content() (result Content) {
 			}
 			g.Tl = -args[1].Float64()
 			fallthrough
+
 		case "Td": // move text position
 			if len(args) != 2 {
 				panic("bad Td")
@@ -567,6 +688,7 @@ func (p Page) Content() (result Content) {
 			if len(args) != 1 {
 				panic("bad Tj operator")
 			}
+			//p.logger("  Tj: %d %s", args[0].Kind(), args[0].RawString())
 			showText(args[0].RawString())
 
 		case "TJ": // show text, allowing individual glyph positioning
@@ -574,6 +696,7 @@ func (p Page) Content() (result Content) {
 			for i := 0; i < v.Len(); i++ {
 				x := v.Index(i)
 				if x.Kind() == String {
+					//p.logger("  TJ: %x", x.RawString())
 					showText(x.RawString())
 				} else {
 					tx := -x.Float64() / 1000 * g.Tfs * g.Th
