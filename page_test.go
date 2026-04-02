@@ -46,7 +46,7 @@ func TestPageInheritance(t *testing.T) {
 	pages.DictVal["MediaBox"] = Object{Kind: Array, ArrayVal: []Object{{Kind: Integer, Int64Val: 0}, {Kind: Integer, Int64Val: 0}, {Kind: Integer, Int64Val: 612}, {Kind: Integer, Int64Val: 792}}}
 	page.DictVal["Parent"] = Object{Kind: Dict, DictVal: pages.DictVal} // simplified for test
 
-	p := Page{V: Value{obj: page}}
+	p := Page{Value: Value{obj: page}}
 	mb := p.findInherited("MediaBox")
 	if mb.Kind() != Array || mb.Len() != 4 {
 		t.Errorf("MediaBox inheritance failed: got %v", mb)
@@ -82,7 +82,7 @@ func TestPageResources(t *testing.T) {
 	page := Object{Kind: Dict, DictVal: make(map[string]Object)}
 	page.DictVal["Resources"] = res
 
-	p := Page{V: Value{obj: page}}
+	p := Page{Value: Value{obj: page}}
 	if p.Resources().Kind() != Dict {
 		t.Error("Resources() failed")
 	}
@@ -205,7 +205,7 @@ func TestPageContent(t *testing.T) {
 		},
 	}}
 
-	p := Page{V: Value{r: r, obj: page}}
+	p := Page{Value: Value{r: r, obj: page}}
 	content := p.Content()
 
 	if len(content.Text) != 2 {
@@ -352,7 +352,7 @@ Q
 			StreamOffset: 0,
 		},
 	}}
-	p := Page{V: Value{r: r, obj: page}}
+	p := Page{Value: Value{r: r, obj: page}}
 	content := p.Content()
 
 	if len(content.Rect) != 1 {
