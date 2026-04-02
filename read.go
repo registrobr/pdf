@@ -15,12 +15,13 @@ import (
 	"encoding/ascii85"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"sort"
 	"strconv"
 )
+
+type LoggerFunc func(string, ...any)
 
 // A Reader is a single PDF file open for reading.
 type Reader struct {
@@ -36,6 +37,7 @@ type Reader struct {
 	XrefInformation ReaderXrefInformation
 	PDFVersion      string
 	closer          io.Closer
+	logger          LoggerFunc
 
 	// objCache caches resolved objects to prevent repetitive disk I/O.
 	// Map key is the object ID.
@@ -87,8 +89,14 @@ func GetDict() Object {
 	return Object{Kind: Dict, DictVal: make(map[string]Object)}
 }
 
+/*
 func (r *Reader) errorf(format string, args ...any) {
 	panic(fmt.Errorf(format, args...))
+}
+*/
+
+func (r *Reader) SetLoggger(l LoggerFunc) {
+	r.logger = l
 }
 
 func (r *Reader) Xref() []xref {
@@ -118,7 +126,6 @@ func (r *Reader) GetObject(id uint32) (Value, error) {
 
 // Open opens a file for reading.
 func Open(file string) (*Reader, error) {
-	// TODO: Deal with closing file.
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, err
@@ -140,11 +147,15 @@ func NewReader(f io.ReaderAt, size int64) (*Reader, error) {
 // If the PDF is encrypted, NewReaderEncrypted calls pw repeatedly to obtain passwords
 // to try. If pw returns the empty string, NewReaderEncrypted stops trying to decrypt
 // the file and returns an error.
+// nolint: gocyclo
 func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
 	buf := make([]byte, 10)
-	f.ReadAt(buf, 0)
-	if (!bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7') && (!bytes.HasPrefix(buf, []byte("%PDF-2.")) || buf[7] < '0' || buf[7] > '0') {
-		return nil, fmt.Errorf("not a PDF file: invalid header")
+	if _, err := f.ReadAt(buf, 0); err != nil {
+		return nil, err
+	}
+	if (!bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7') &&
+		(!bytes.HasPrefix(buf, []byte("%PDF-2.")) || buf[7] != '0') {
+		return nil, fmt.Errorf("not a PDF file: invalid header %s", string(buf))
 	}
 
 	version := buf[5:8]
@@ -152,42 +163,48 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	end := size
 
 	// Some PDF's are quite broken and have a lot of stuff after %%EOF.
-	searchSize := int64(200)
-	searchSizeRead := int(0)
+	var eofPosition int64
+	offset := end
 
-EOFDetect:
+	const pattern = "%%EOF"
+	patternBytes := []byte(pattern)
+	const segSize = int64(32 * 1024)
+	bufSize := segSize
 	for {
-		buf = make([]byte, searchSize)
-
-		searchSizeRead, _ = f.ReadAt(buf, end-searchSize)
-		for len(buf) > 0 && buf[len(buf)-1] == '\n' || buf[len(buf)-1] == '\r' {
-			buf = buf[:len(buf)-1]
-		}
-		buf = bytes.TrimRight(buf, "\r\n\t ")
-		for {
-			if len(buf) == 5 {
-				break
-			}
-
-			if bytes.HasSuffix(buf, []byte("%%EOF")) {
-				break EOFDetect
-			}
-
-			buf = buf[0 : len(buf)-1]
-		}
-
-		searchSize += 200
-
-		if searchSize > end {
+		if offset <= 0 {
 			return nil, fmt.Errorf("not a PDF file: missing %%%%EOF")
+		}
+
+		if bufSize > offset {
+			// Read first segment from f
+			bufSize = offset
+		}
+
+		if offset != end {
+			// Read additional bytes, handling the case when the pattern occurs between segments
+			bufSize = segSize + int64(len(pattern)) - 1
+		}
+
+		if len(buf) != int(bufSize) {
+			buf = make([]byte, bufSize)
+		}
+		offset -= bufSize
+
+		if _, err := f.ReadAt(buf, offset); err != nil {
+			return nil, err
+		}
+
+		if i := bytes.LastIndex(buf, patternBytes); i > 0 {
+			eofPosition = offset + int64(i)
+			break
 		}
 	}
 
-	eofPosition := len(buf)
-
 	// Read 200 bytes before the %%EOF.
 	buf = make([]byte, int64(200))
-	f.ReadAt(buf, end-(int64(searchSizeRead)-int64(eofPosition))-int64(len(buf)))
+	if _, err := f.ReadAt(buf, int64(eofPosition-200)); err != nil {
+		return nil, err
+	}
 
 	i := findLastLine(buf, "startxref")
 	if i < 0 {
@@ -199,12 +216,13 @@ EOFDetect:
 		end:             end,
 		XrefInformation: ReaderXrefInformation{},
 		PDFVersion:      string(version),
+		logger:          func(string, ...any) {},
 		objCache:        make(map[uint32]Value),
 	}
 	if c, ok := f.(io.Closer); ok {
 		r.closer = c
 	}
-	pos := (end - (int64(searchSizeRead) - int64(eofPosition)) - int64(len(buf))) + int64(i)
+	pos := eofPosition - 200 + int64(i)
 
 	// Save the position of the startxref element.
 	r.XrefInformation.PositionStartPos = pos
@@ -800,7 +818,7 @@ func newStreamReader(s Object, r *Reader) io.ReadCloser {
 		}
 	}
 
-	return ioutil.NopCloser(rd)
+	return io.NopCloser(rd)
 }
 
 func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
@@ -918,6 +936,7 @@ var passwordPad = []byte{
 	0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 }
 
+// nolint: gocyclo
 func (r *Reader) initEncrypt(password string) error {
 	// See PDF 32000-1:2008, §7.6.
 	// r.trailer is Object.
@@ -995,7 +1014,7 @@ func (r *Reader) initEncrypt(password string) error {
 	key := h.Sum(nil)
 
 	if R >= 3 {
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			h.Reset()
 			h.Write(key[:n/8])
 			key = h.Sum(key[:0])
@@ -1181,7 +1200,7 @@ func decryptString(key []byte, useAES bool, encVersion int, ptr Objptr, x string
 	if useAES {
 		data := []byte(x)
 		if len(data) < aes.BlockSize {
-			return "", nil
+			return x, nil
 		}
 		iv := data[:aes.BlockSize]
 		ciphertext := data[aes.BlockSize:]
@@ -1194,7 +1213,7 @@ func decryptString(key []byte, useAES bool, encVersion int, ptr Objptr, x string
 		if len(ciphertext)%aes.BlockSize != 0 {
 			// return "", fmt.Errorf("decryption error: ciphertext not a multiple of block size")
 			// Try to handle gracefully?
-			return "", nil
+			return x, nil
 		}
 
 		mode := cipher.NewCBCDecrypter(block, iv)
