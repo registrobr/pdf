@@ -4,11 +4,6 @@
 
 package pdf
 
-import (
-	"fmt"
-	"io"
-)
-
 // A Stack represents a stack of values.
 type Stack struct {
 	stack []Value
@@ -74,8 +69,6 @@ Reading:
 		if tok.Kind == Keyword {
 			kw := tok.KeywordVal
 			switch kw {
-			case "null", "[", "]", "<<", ">>":
-				break
 			default:
 				for i := len(dicts) - 1; i >= 0; i-- {
 					if v, ok := dicts[i][kw]; ok {
@@ -85,6 +78,8 @@ Reading:
 				}
 				do(&stk, kw)
 				continue
+			case "null", "[", "]", "<<", ">>":
+				break
 			case "dict":
 				stk.Pop()
 				stk.Push(Value{obj: Object{Kind: Dict, DictVal: make(map[string]Object)}, err: nil})
@@ -115,7 +110,9 @@ Reading:
 				val := stk.Pop()
 				keyObj := stk.Pop()
 				if keyObj.Kind() != Name {
-					panic("def of non-name")
+					// panic("def of non-name " + val.Name())
+					// Try ignoring
+					continue
 				}
 				key := keyObj.Name()
 				dicts[len(dicts)-1][key] = val.obj
@@ -131,6 +128,7 @@ Reading:
 	}
 }
 
+/*
 type seqReader struct {
 	rd     io.Reader
 	offset int64
@@ -144,3 +142,4 @@ func (r *seqReader) ReadAt(buf []byte, offset int64) (int, error) {
 	r.offset += int64(n)
 	return n, err
 }
+*/
