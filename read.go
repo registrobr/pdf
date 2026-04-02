@@ -202,7 +202,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 
 	// Read 200 bytes before the %%EOF.
 	buf = make([]byte, int64(200))
-	if _, err := f.ReadAt(buf, int64(eofPosition-200)); err != nil {
+	if _, err := f.ReadAt(buf, (eofPosition - 200)); err != nil {
 		return nil, err
 	}
 
@@ -374,6 +374,7 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, Objptr, Object, error) {
 	return table, strmptr, strm, nil
 }
 
+// nolint: gocyclo
 func readXrefStreamData(r *Reader, strm Object, table []xref, size int64) ([]xref, error) {
 	index := strm.DictVal["Index"]
 	if index.Kind == Null {
@@ -467,13 +468,13 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, Objptr, Object, error) {
 	}
 
 	// Get length of trailer keyword and newline.
-	trailer_length := int64(len("trailer")) + 1
+	trailerLength := int64(len("trailer")) + 1
 
 	// Save end position.
-	r.XrefInformation.EndPos = (r.XrefInformation.StartPos - trailer_length) + b.realPos
+	r.XrefInformation.EndPos = (r.XrefInformation.StartPos - trailerLength) + b.realPos
 
 	// Save length position. Useful for calculations. Remove trailer keyword length, add 1 for newline.
-	r.XrefInformation.Length = (b.realPos - trailer_length) + 1
+	r.XrefInformation.Length = (b.realPos - trailerLength) + 1
 
 	trailer := b.readObject()
 	if trailer.Kind != Dict {
@@ -537,6 +538,7 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, Objptr, Object, error) {
 	return table, Objptr{}, trailer, nil
 }
 
+// nolint: gocyclo
 func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 	for {
 		tok := b.readToken()
@@ -575,7 +577,7 @@ func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 				table = table[:x+1]
 			}
 			if alloc == "n" && table[x].offset == 0 {
-				table[x] = xref{ptr: Objptr{uint32(x), uint16(gen)}, offset: int64(off)}
+				table[x] = xref{ptr: Objptr{uint32(x), uint16(gen)}, offset: off}
 			}
 		}
 	}
@@ -597,6 +599,7 @@ func findLastLine(buf []byte, s string) int {
 	}
 }
 
+// nolint: gocyclo
 func objfmt(x Object) string {
 	switch x.Kind {
 	default:
@@ -656,6 +659,7 @@ func objfmt(x Object) string {
 	}
 }
 
+// nolint: gocyclo
 func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 	defer func() {
 		if e := recover(); e != nil {
@@ -1002,7 +1006,7 @@ func (r *Reader) initEncrypt(password string) error {
 	}
 	h.Write([]byte(O))
 	h.Write([]byte{byte(P), byte(P >> 8), byte(P >> 16), byte(P >> 24)})
-	h.Write([]byte(ID))
+	h.Write(ID)
 
 	if R >= 4 {
 		e := encrypt["EncryptMetadata"].BoolVal
@@ -1037,7 +1041,7 @@ func (r *Reader) initEncrypt(password string) error {
 	} else {
 		h.Reset()
 		h.Write(passwordPad)
-		h.Write([]byte(ID))
+		h.Write(ID)
 		u = h.Sum(nil)
 		c.XORKeyStream(u, u)
 
@@ -1294,7 +1298,6 @@ func (r *cbcReader) Read(b []byte) (n int, err error) {
 type rc4Reader struct {
 	cipher *rc4.Cipher
 	rd     io.Reader
-	buf    []byte
 }
 
 func (r *rc4Reader) Read(b []byte) (n int, err error) {
