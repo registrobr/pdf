@@ -763,7 +763,7 @@ func (b *buffer) readArray() Object {
 	x := make([]Object, 0, 8)
 	for {
 		obj := b.readObject()
-		if obj.Kind == Keyword && obj.KeywordVal == "]" {
+		if obj.MatchKeyword("]") {
 			break
 		}
 		if obj.Kind == Null && b.eof {
@@ -780,7 +780,7 @@ func (b *buffer) readDict() Object {
 	decDisabled := false
 	for {
 		tok := b.readToken()
-		if tok.Kind == Keyword && tok.KeywordVal == ">>" {
+		if tok.MatchKeyword(">>") {
 			break
 		}
 		if tok.Kind == Null && b.eof {

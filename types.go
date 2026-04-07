@@ -43,6 +43,18 @@ type Object struct {
 	StreamOffset int64 // For Stream, DictVal holds the header
 }
 
+func (o *Object) MatchKeyword(val string) bool {
+	return o.Kind == Keyword && o.KeywordVal == val
+}
+
+func (o *Object) MatchName(val string) bool {
+	return o.Kind == Name && o.NameVal == val
+}
+
+func (o *Object) MatchString(val string) bool {
+	return o.Kind == String && o.KeywordVal == val
+}
+
 // Internal types
 type Objptr struct {
 	id  uint32
