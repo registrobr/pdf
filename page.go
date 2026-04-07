@@ -489,11 +489,13 @@ func (p Page) Content() Content {
 // an empty Content in such cases for security and robustness.
 // nolint: gocyclo
 func (p *Page) contentStream(strm Value) (result Content) {
+	var text []Text
+	var rect []Rect
+
 	// Security: recover from panics in malformed content streams
 	defer func() {
 		if r := recover(); r != nil {
-			// Return empty content on malformed input
-			result = Content{}
+			result = Content{text, rect}
 		}
 	}()
 
@@ -504,7 +506,6 @@ func (p *Page) contentStream(strm Value) (result Content) {
 		CTM: ident,
 	}
 
-	var text []Text
 	showText := func(s string) {
 		n := 0
 		for _, ch := range enc.Decode(s) {
@@ -533,7 +534,6 @@ func (p *Page) contentStream(strm Value) (result Content) {
 		}
 	}
 
-	var rect []Rect
 	var gstack []gstate
 	Interpret(strm, func(stk *Stack, op string) {
 		n := stk.Len()
@@ -552,7 +552,7 @@ func (p *Page) contentStream(strm Value) (result Content) {
 				panic("bad g.Tm")
 			}
 			var m matrix
-			for i := 0; i < 6; i++ {
+			for i := range 6 {
 				m[i/2][i%2] = args[i].Float64()
 			}
 			m[2][2] = 1
@@ -585,6 +585,9 @@ func (p *Page) contentStream(strm Value) (result Content) {
 
 		case "cs": // set colorspace non-stroking
 		case "Do": // Invoke named XObject
+			if len(args) != 1 {
+				panic("bad Do")
+			}
 			name := strings.TrimPrefix(args[0].String(), "/")
 			v := p.Key("Resources").Key("XObject").Key(name)
 			if _, found := p.xobjects[name]; !found && v.Kind() == Stream && v.Key("Subtype").Name() == "Form" {
@@ -634,13 +637,13 @@ func (p *Page) contentStream(strm Value) (result Content) {
 
 		case "Tc": // set character spacing
 			if len(args) != 1 {
-				panic("bad g.Tc")
+				panic("bad Tc")
 			}
 			g.Tc = args[0].Float64()
 
 		case "TD": // move text position and set leading
 			if len(args) != 2 {
-				panic("bad Td")
+				panic("bad TD")
 			}
 			g.Tl = -args[1].Float64()
 			fallthrough
@@ -657,7 +660,7 @@ func (p *Page) contentStream(strm Value) (result Content) {
 
 		case "Tf": // set text font and size
 			if len(args) != 2 {
-				panic("bad TL")
+				panic("bad Tf")
 			}
 			f := args[0].Name()
 			g.Tf = p.Font(f)
@@ -712,10 +715,10 @@ func (p *Page) contentStream(strm Value) (result Content) {
 
 		case "Tm": // set text matrix and line matrix
 			if len(args) != 6 {
-				panic("bad g.Tm")
+				panic("bad Tm")
 			}
 			var m matrix
-			for i := 0; i < 6; i++ {
+			for i := range 6 {
 				m[i/2][i%2] = args[i].Float64()
 			}
 			m[2][2] = 1
@@ -736,7 +739,7 @@ func (p *Page) contentStream(strm Value) (result Content) {
 
 		case "Tw": // set word spacing
 			if len(args) != 1 {
-				panic("bad g.Tw")
+				panic("bad Tw")
 			}
 			g.Tw = args[0].Float64()
 

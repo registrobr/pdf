@@ -61,11 +61,6 @@ type Objptr struct {
 	gen uint16
 }
 
-type objdef struct {
-	ptr Objptr
-	obj Object
-}
-
 // A Value represents a value in a PDF file.
 type Value struct {
 	r   *Reader // the reader, for resolving references

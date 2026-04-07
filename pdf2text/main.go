@@ -34,6 +34,10 @@ func extractTextFromPDF(filename string) (response string, err error) {
 	}
 	defer reader.Close()
 
+	// logger := func(format string, a ...any) {
+	// 	fmt.Printf(format+"\n", a...)
+	// }
+	// reader.SetLoggger(logger)
 	m := pdf.ParseMetaInfo(reader.Trailer())
 	fmt.Println(filename, "Producer:", m["Info.Producer"])
 

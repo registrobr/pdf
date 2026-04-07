@@ -302,7 +302,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		r.XrefInformation.StartPos = startxref
 	}
 	b = newBuffer(io.NewSectionReader(r.f, startxref, r.end-startxref), startxref, r.encVersion)
-	xref, trailerptr, trailer, err := readXref(r, b, startxrefFound)
+	xref, trailerptr, trailer, err := readXref(r, b)
 	if err != nil {
 		return nil, err
 	}
@@ -355,25 +355,24 @@ func (r *Reader) Trailer() Value {
 	return Value{r: r, ptr: r.trailerptr, obj: r.trailer}
 }
 
-func readXref(r *Reader, b *buffer, startxrefFound bool) ([]xref, Objptr, Object, error) {
-	offset := b.readOffset()
-	// Special handling for offset 116 which is extremely common in corrupted PDFs
-	// This offset often indicates a systematic corruption pattern
-	if offset == 116 || !startxrefFound {
-		// Try multiple recovery strategies specific to offset 116
-		if xr, trailerptr, trailer, err := tryRecoverFromOffset116(r); err == nil {
+func readXref(r *Reader, b *buffer) ([]xref, Objptr, Object, error) {
+	tok := b.readToken()
+	if tok.MatchKeyword("xref") {
+		if xr, trailerptr, trailer, err := readXrefTable(r, b); err == nil {
+			return xr, trailerptr, trailer, err
+		}
+	}
+	if tok.Kind == Integer {
+		b.unreadToken(tok)
+		if xr, trailerptr, trailer, err := readXrefStream(r, b); err == nil {
 			return xr, trailerptr, trailer, err
 		}
 	}
 
-	tok := b.readToken()
-	if tok.MatchKeyword("xref") {
-		return readXrefTable(r, b)
+	if xr, trailerptr, trailer, err := tryRecoverFromOffset116(r); err == nil {
+		return xr, trailerptr, trailer, err
 	}
-	if tok.Kind == Integer {
-		b.unreadToken(tok)
-		return readXrefStream(r, b)
-	}
+
 	return nil, Objptr{}, Object{Kind: Null}, fmt.Errorf("malformed PDF: cross-reference table not found: %v", tok)
 }
 
@@ -1162,7 +1161,13 @@ func objfmt(x Object) string {
 	case Real:
 		return strconv.FormatFloat(x.Float64Val, 'f', -1, 64)
 	case String:
-		return "(" + x.StringVal + ")"
+		if isPDFDocEncoded(x.StringVal) {
+			return strconv.Quote(pdfDocDecode(x.StringVal))
+		}
+		if isUTF16(x.StringVal) {
+			return strconv.Quote(utf16Decode(x.StringVal[2:]))
+		}
+		return strconv.Quote(x.StringVal)
 	case Name:
 		return "/" + x.NameVal
 	case Keyword:
@@ -1508,9 +1513,6 @@ func (r *Reader) initEncrypt(password string) error {
 
 	if encrypt["Filter"].NameVal != "Standard" {
 		return fmt.Errorf("unsupported PDF: encryption filter %v", objfmt(Object{Kind: Name, NameVal: encrypt["Filter"].NameVal}))
-	}
-	for k := range encrypt {
-		fmt.Printf("%s\n", k)
 	}
 	n := encrypt["Length"].Int64Val
 	if n == 0 {
