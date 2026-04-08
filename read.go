@@ -11,7 +11,6 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rc4"
-	"crypto/sha256"
 	"encoding/ascii85"
 	"errors"
 	"fmt"
@@ -1241,15 +1240,18 @@ func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 		Search:
 			for {
 				if strm.Kind() != Stream {
-					panic("not a stream")
+					// Tolerate corrupted xref stream reference
+					return Value{}
 				}
 				if strm.Key("Type").Name() != "ObjStm" {
-					panic("not an object stream")
+					// Not an object stream, return empty
+					return Value{}
 				}
 				n := int(strm.Key("N").Int64())
 				first := strm.Key("First").Int64()
 				if first == 0 {
-					panic("missing First")
+					// Missing First entry, return empty
+					return Value{}
 				}
 				b := newBuffer(strm.Reader(), 0, r.encVersion)
 				defer bufferPool.Put(b)
@@ -1514,20 +1516,21 @@ func (r *Reader) initEncrypt(password string) error {
 	if encrypt["Filter"].NameVal != "Standard" {
 		return fmt.Errorf("unsupported PDF: encryption filter %v", objfmt(Object{Kind: Name, NameVal: encrypt["Filter"].NameVal}))
 	}
-	n := encrypt["Length"].Int64Val
-	if n == 0 {
-		n = 40
-	}
-	// For V=5 (AES-256), Length is usually 256.
-	if n%8 != 0 || n > 256 || n < 40 {
-		return fmt.Errorf("malformed PDF: %d-bit encryption key", n)
-	}
+
 	V := encrypt["V"].Int64Val
 
 	// Support V=5
 	// If V=5, delegate to V5 authentication
 	if V == 5 {
 		return r.initEncryptV5(password, encrypt)
+	}
+
+	n := encrypt["Length"].Int64Val
+	if n == 0 {
+		n = 40
+	}
+	if n%8 != 0 || n > 128 || n < 40 {
+		return fmt.Errorf("malformed PDF: %d-bit encryption key", n)
 	}
 
 	if V != 1 && V != 2 && V != 4 {
@@ -1628,84 +1631,46 @@ func (r *Reader) initEncrypt(password string) error {
 }
 
 func (r *Reader) initEncryptV5(password string, encrypt map[string]Object) error {
-	// AES-256 (V=5, R=5/6)
-	// See ISO 32000-2 7.6.3.3 and Extension Level 3 logic
+	ids := r.trailer.DictVal["ID"].ArrayVal
+	if len(ids) < 1 {
+		return fmt.Errorf("malformed PDF: missing ID in trailer")
+	}
+	idstr := ids[0].StringVal
 
-	O := encrypt["O"].StringVal
-	U := encrypt["U"].StringVal
-	OE := encrypt["OE"].StringVal
+	// Extract additional parameters for V=5
 	UE := encrypt["UE"].StringVal
-	// Perms := encrypt["Perms"].StringVal
+	OE := encrypt["OE"].StringVal
+	Perms := encrypt["Perms"].StringVal
 
-	// Standard check for V=5 string lengths
-	if len(O) != 48 || len(U) != 48 || len(OE) != 32 || len(UE) != 32 {
-		return fmt.Errorf("malformed PDF V=5: invalid O/U/OE/UE length")
+	if len(UE) != 32 || len(OE) != 32 || len(Perms) != 16 {
+		return fmt.Errorf("malformed PDF: missing UE/OE/Perms encryption parameters for V=5")
 	}
 
-	// Authenticate
-	// Try User Password (U)
-	key, ok := authenticateV5Password(password, []byte(U), []byte(UE))
-	if !ok {
-		// Try Owner Password (O)
-		key, ok = authenticateV5Password(password, []byte(O), []byte(OE))
+	// Create encryption info for V=5
+	info := PDFEncryptionInfo{
+		Version:   EncryptionVersion(encrypt["V"].Int64Val),
+		Revision:  EncryptionRevision(encrypt["R"].Int64Val),
+		Method:    MethodAESV3,
+		KeyLength: 256,
+		P:         uint32(encrypt["P"].Int64Val),
+		ID:        []byte(idstr),
+		O:         []byte(encrypt["O"].StringVal),
+		U:         []byte(encrypt["U"].StringVal),
+		UE:        []byte(UE),
+		OE:        []byte(OE),
+		Perms:     []byte(Perms),
+	} // Try to authenticate with the provided password
+	auth := NewPasswordAuth(&info)
+	key, err := auth.Authenticate(password)
+	if err != nil {
+		return err
 	}
 
-	if !ok {
-		return ErrInvalidPassword
-	}
-
-	r.key = key // The FEK
+	r.key = key
 	r.encKey = key
 	r.useAES = true
 	r.encVersion = 5
 	return nil
-}
-
-func authenticateV5Password(password string, entry []byte, payload []byte) (fek []byte, ok bool) {
-	// entry is 48 bytes: 32 hash + 8 val salt + 8 key salt
-	if len(entry) != 48 {
-		return nil, false
-	}
-	hashStored := entry[:32]
-	valSalt := entry[32:40]
-	keySalt := entry[40:48]
-
-	// Truncate password to 127 bytes UTF-8
-	pwdBytes := []byte(password)
-	if len(pwdBytes) > 127 {
-		pwdBytes = pwdBytes[:127]
-	}
-
-	// 1. Validate Password
-	h := sha256.New()
-	h.Write(pwdBytes)
-	h.Write(valSalt)
-	hashComputed := h.Sum(nil)
-
-	if !bytes.Equal(hashComputed, hashStored) {
-		return nil, false
-	}
-
-	// 2. Decrypt FEK (payload) using derived key
-	// Key = SHA256(pwd + KeySalt)
-	h.Reset()
-	h.Write(pwdBytes)
-	h.Write(keySalt)
-	kdk := h.Sum(nil) // 32 bytes Key Derivation Key
-
-	// Decrypt payload (UE or OE) using AES-256-CBC with zero IV
-	block, err := aes.NewCipher(kdk)
-	if err != nil {
-		return nil, false
-	}
-
-	iv := make([]byte, aes.BlockSize) // Zero IV
-	plaintext := make([]byte, len(payload))
-	mode := cipher.NewCBCDecrypter(block, iv)
-	mode.CryptBlocks(plaintext, payload)
-
-	// FEK is the payload (32 bytes)
-	return plaintext, true
 }
 
 var ErrInvalidPassword = fmt.Errorf("encrypted PDF: invalid password")
