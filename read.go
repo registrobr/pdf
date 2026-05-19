@@ -6,6 +6,7 @@ package pdf
 
 import (
 	"bytes"
+	"compress/lzw"
 	"compress/zlib"
 	"crypto/aes"
 	"crypto/cipher"
@@ -1501,6 +1502,17 @@ func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
 	// Used for JPEG2000; no need to decode
 	case "JPXDecode":
 		return rd, nil
+	case "CCITTFaxDecode":
+		// CCITT Group 3/4 data is left as-is for callers that understand the encoding.
+		return rd, nil
+	case "LZWDecode":
+		early := param.Key("EarlyChange")
+		if early.Kind() != Null && early.Int64() != 1 {
+			// Unsupported LZW configuration, return nil
+			return nil, fmt.Errorf("unsupported LZW configuration")
+		}
+		lr := lzw.NewReader(rd, lzw.MSB, 8)
+		return applyPredictor(lr, param)
 	case "ASCIIHexDecode":
 		return asciiHexReader{rd}, nil
 	case "ASCII85Decode":
@@ -1510,17 +1522,29 @@ func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
 		if err != nil {
 			return nil, err
 		}
-		pred := param.Key("Predictor")
-		if pred.Kind() == Null {
-			return zr, nil
-		}
+		return applyPredictor(zr, param)
+	}
+}
+
+func applyPredictor(rd io.Reader, param Value) (io.Reader, error) {
+	if param.Kind() != Dict {
+		return rd, nil
+	}
+	pred := param.Key("Predictor")
+	if pred.Kind() == Null {
+		return rd, nil
+	}
+	switch pred.Int64() {
+	case 1, 2:
+		return rd, nil
+	case 12:
 		columns := param.Key("Columns").Int64()
-		switch pred.Int64() {
-		default:
-			return nil, fmt.Errorf("unknown predictor %v", pred)
-		case 12:
-			return &pngUpReader{r: zr, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}, nil
+		if columns <= 0 {
+			columns = 1
 		}
+		return &pngUpReader{r: rd, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}, nil
+	default:
+		return rd, fmt.Errorf("unknown predictor %v", pred)
 	}
 }
 
