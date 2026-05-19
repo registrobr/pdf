@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type LoggerFunc func(string, ...any)
@@ -43,6 +44,11 @@ type Reader struct {
 	// objCache caches resolved objects to prevent repetitive disk I/O.
 	// Map key is the object ID.
 	objCache map[uint32]Value
+	cacheCap int
+
+	// Cache for object streams to avoid re-parsing
+	objStreamCache   map[uint32]map[int64]int64
+	objStreamCacheMu sync.RWMutex
 }
 
 type ReaderXrefInformation struct {
@@ -256,12 +262,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		return nil, err
 	}
 
-	i := findLastLine(buf, "startxref")
-	if i < 0 {
-		i = 0
-		//return nil, fmt.Errorf("malformed PDF file: missing final startxref")
-	}
-
+	i := max(findLastLine(buf, "startxref"), 0)
 	r := &Reader{
 		f:               f,
 		end:             end,
@@ -269,6 +270,8 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		PDFVersion:      version,
 		logger:          func(string, ...any) {},
 		objCache:        make(map[uint32]Value),
+		cacheCap:        2000,
+		objStreamCache:  make(map[uint32]map[int64]int64),
 	}
 	if c, ok := f.(io.Closer); ok {
 		r.closer = c
@@ -303,11 +306,50 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	b = newBuffer(io.NewSectionReader(r.f, startxref, r.end-startxref), startxref, r.encVersion)
 	xref, trailerptr, trailer, err := readXref(r, b)
 	if err != nil {
-		return nil, err
+		// Recovery strategy chain:
+		// 1. Try searchAndParseXref (search for xref/XRef in file)
+		// 2. Try rebuildXrefTable (scan for all objects)
+		// 3. Try RecoverPDF (comprehensive recovery with multiple strategies)
+
+		recovered := false
+
+		// Strategy 1: Search for xref table/stream
+		if searchErr := r.searchAndParseXref(); searchErr == nil {
+			trailer = r.trailer
+			trailerptr = r.trailerptr
+			recovered = true
+			// fmt.Println("Recovery successful: searchAndParseXref")
+		}
+		// Strategy 2: Rebuild xref by scanning objects
+		if !recovered {
+			if rebuildErr := r.rebuildXrefTable(); rebuildErr == nil {
+				trailer = r.trailer
+				recovered = true
+				// fmt.Println("Recovery successful: rebuildXrefTable")
+			}
+		}
+		/*
+			// Strategy 3: Use comprehensive recovery
+			if !recovered {
+				opts := DefaultRecoveryOptions()
+				if recoverErr := recoverPDFInternal(r, opts); recoverErr == nil {
+					trailer = r.trailer
+					recovered = true
+					fmt.Println("Recovery successful: RecoverPDF")
+				}
+			}
+		*/
+		if !recovered {
+			return nil, fmt.Errorf("malformed PDF: xref table at offset %d: %v (all recovery strategies failed)", startxref, err)
+		}
+
+		_ = trailerptr // Not used for rebuilt xref
+	} else {
+		r.xref = xref
+		r.trailer = trailer
+		r.trailerptr = trailerptr
 	}
-	r.xref = xref
-	r.trailer = trailer
-	r.trailerptr = trailerptr
+
 	if trailer.Kind == Dict && trailer.DictVal["Encrypt"].Kind == Null {
 		return r, nil
 	}
@@ -354,22 +396,27 @@ func (r *Reader) Trailer() Value {
 	return Value{r: r, ptr: r.trailerptr, obj: r.trailer}
 }
 
-func readXref(r *Reader, b *buffer) ([]xref, Objptr, Object, error) {
+func readXref(r *Reader, b *buffer) (xr []xref, trailerptr Objptr, trailer Object, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("malformed PDF: %v", rec)
+		}
+	}()
 	tok := b.readToken()
 	if tok.MatchKeyword("xref") {
-		if xr, trailerptr, trailer, err := readXrefTable(r, b); err == nil {
-			return xr, trailerptr, trailer, err
+		if xr, trailerptr, trailer, err = readXrefTable(r, b); err == nil {
+			return
 		}
 	}
 	if tok.Kind == Integer {
 		b.unreadToken(tok)
-		if xr, trailerptr, trailer, err := readXrefStream(r, b); err == nil {
-			return xr, trailerptr, trailer, err
+		if xr, trailerptr, trailer, err = readXrefStream(r, b); err == nil {
+			return
 		}
 	}
 
-	if xr, trailerptr, trailer, err := tryRecoverFromOffset116(r); err == nil {
-		return xr, trailerptr, trailer, err
+	if xr, trailerptr, trailer, err = tryRecoverFromOffset116(r); err == nil {
+		return
 	}
 
 	return nil, Objptr{}, Object{Kind: Null}, fmt.Errorf("malformed PDF: cross-reference table not found: %v", tok)
@@ -1237,6 +1284,8 @@ func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 		var obj Object
 		if xref.inStream {
 			strm := r.resolve(parent, Object{Kind: Indirect, PtrVal: xref.stream})
+			currentStreamID := xref.stream.id
+
 		Search:
 			for {
 				if strm.Kind() != Stream {
@@ -1253,26 +1302,83 @@ func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 					// Missing First entry, return empty
 					return Value{}
 				}
-				b := newBuffer(strm.Reader(), 0, r.encVersion)
-				defer bufferPool.Put(b)
-				b.allowEOF = true
-				for i := 0; i < n; i++ {
-					idObj := b.readToken()
-					offObj := b.readToken()
-					id := idObj.Int64Val
-					off := offObj.Int64Val
 
-					if uint32(id) == ptr.id {
-						b.seekForward(first + off)
-						x = b.readObject()
-						break Search
+				var offset int64
+				found := false
+
+				if currentStreamID != 0 {
+					// Check cache
+					r.objStreamCacheMu.RLock()
+					if cache, ok := r.objStreamCache[currentStreamID]; ok {
+						if off, ok := cache[int64(ptr.id)]; ok {
+							offset = off
+							found = true
+						}
+					}
+					r.objStreamCacheMu.RUnlock()
+
+					if !found {
+						// Check if populated
+						r.objStreamCacheMu.RLock()
+						_, populated := r.objStreamCache[currentStreamID]
+						r.objStreamCacheMu.RUnlock()
+
+						if !populated {
+							// Populate cache
+							b := newBuffer(strm.Reader(), 0, r.encVersion)
+							defer bufferPool.Put(b)
+							b.allowEOF = true
+							streamCache := make(map[int64]int64, n)
+							for range n {
+								id := b.readToken().Int64Val
+								off := b.readToken().Int64Val
+								streamCache[id] = first + off
+							}
+
+							r.objStreamCacheMu.Lock()
+							r.objStreamCache[currentStreamID] = streamCache
+							r.objStreamCacheMu.Unlock()
+
+							if off, ok := streamCache[int64(ptr.id)]; ok {
+								offset = off
+								found = true
+							}
+						}
+					}
+				} else {
+					// Fallback for Extends streams
+					b := newBuffer(strm.Reader(), 0, r.encVersion)
+					defer bufferPool.Put(b)
+					b.allowEOF = true
+					for range n {
+						id := b.readToken().Int64Val
+						off := b.readToken().Int64Val
+
+						if uint32(id) == ptr.id {
+							b.seekForward(first + off)
+							found = true
+							break
+						}
 					}
 				}
+
+				if found {
+					b := newBuffer(strm.Reader(), 0, r.encVersion)
+					defer bufferPool.Put(b)
+					b.seekForward(offset)
+					x = b.readObject()
+					val := r.createValue(parent, x)
+					r.objCache[ptr.id] = val
+					break Search
+				}
+
 				ext := strm.Key("Extends")
 				if ext.Kind() != Stream {
-					panic("cannot find object in stream")
+					// Cannot find object in stream, return empty
+					return Value{}
 				}
 				strm = ext
+				currentStreamID = 0
 			}
 		} else {
 			b := newBuffer(io.NewSectionReader(r.f, xref.offset, r.end-xref.offset), xref.offset, r.encVersion)
