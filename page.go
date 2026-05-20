@@ -5,7 +5,9 @@
 package pdf
 
 import (
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -13,7 +15,7 @@ import (
 // The methods interpret a Page dictionary stored in V.
 type Page struct {
 	Value
-	logger   LoggerFunc
+	*Reader
 	xobjects map[string]struct{}
 }
 
@@ -45,7 +47,7 @@ Search:
 				if num == 0 {
 					return Page{
 						Value:  kid,
-						logger: r.logger,
+						Reader: r,
 					}
 				}
 				num--
@@ -61,7 +63,7 @@ func (r *Reader) NumPage() int {
 	return int(r.Trailer().Key("Root").Key("Pages").Key("Count").Int64())
 }
 
-func (p Page) findInherited(key string) Value {
+func (p *Page) findInherited(key string) Value {
 	for v := p.Value; !v.IsNull(); v = v.Key("Parent") {
 		if r := v.Key(key); !r.IsNull() {
 			return r
@@ -71,55 +73,77 @@ func (p Page) findInherited(key string) Value {
 }
 
 /*
-func (p Page) MediaBox() Value {
+func (p *Page) MediaBox() Value {
 	return p.findInherited("MediaBox")
 }
 
-func (p Page) CropBox() Value {
+func (p *Page) CropBox() Value {
 	return p.findInherited("CropBox")
 }
 */
 
 // Resources returns the resources dictionary associated with the page.
-func (p Page) Resources() Value {
+func (p *Page) Resources() Value {
 	return p.findInherited("Resources")
 }
 
 // Fonts returns a list of the fonts associated with the page.
-func (p Page) Fonts() []string {
+func (p *Page) Fonts() []string {
 	return p.Resources().Key("Font").Keys()
 }
 
 // Font returns the font with the given name associated with the page.
-func (p Page) Font(name string) Font {
-	return Font{p.Resources().Key("Font").Key(name)}
+func (p *Page) Font(name string) Font {
+	p.r.fontMutex.Lock()
+	defer p.r.fontMutex.Unlock()
+
+	if f, found := p.r.fontCache[name]; found {
+		return f
+	}
+	p.logger("new font %s", name)
+	v := p.Resources().Key("Font").Key(name)
+	if v.IsNull() {
+		xobjects := p.Resources().Key("XObject")
+		for _, k := range xobjects.Keys() {
+			v = xobjects.Key(k).Key("Resources").Key("Font").Key(name)
+			if !v.IsNull() {
+				break
+			}
+		}
+	}
+	response := Font{v, p.r, nil}
+	response.Encoder()
+	p.r.fontCache[name] = response
+	return response
 }
 
 // A Font represent a font in a PDF file.
 // The methods interpret a Font dictionary stored in V.
 type Font struct {
-	V Value
+	Value
+	*Reader
+	enc TextEncoding
 }
 
 // BaseFont returns the font's name (BaseFont property).
 func (f Font) BaseFont() string {
-	return f.V.Key("BaseFont").Name()
+	return f.Key("BaseFont").Name()
 }
 
 // FirstChar returns the code point of the first character in the font.
 func (f Font) FirstChar() int {
-	return int(f.V.Key("FirstChar").Int64())
+	return int(f.Key("FirstChar").Int64())
 }
 
 // LastChar returns the code point of the last character in the font.
 func (f Font) LastChar() int {
-	return int(f.V.Key("LastChar").Int64())
+	return int(f.Key("LastChar").Int64())
 }
 
 // Widths returns the widths of the glyphs in the font.
 // In a well-formed PDF, len(f.Widths()) == f.LastChar()+1 - f.FirstChar().
 func (f Font) Widths() []float64 {
-	x := f.V.Key("Widths")
+	x := f.Key("Widths")
 	var out []float64
 	for i := 0; i < x.Len(); i++ {
 		out = append(out, x.Index(i).Float64())
@@ -134,12 +158,26 @@ func (f Font) Width(code int) float64 {
 	if code < first || last < code {
 		return 0
 	}
-	return f.V.Key("Widths").Index(code - first).Float64()
+	return f.Key("Widths").Index(code - first).Float64()
 }
 
 // Encoder returns the encoding between font code point sequences and UTF-8.
-func (f Font) Encoder() TextEncoding {
-	enc := f.V.Key("Encoding")
+func (f *Font) Encoder() TextEncoding {
+	if f == nil {
+		return nil
+	}
+
+	if f.enc == nil { // caching the Encoder so we don't have to continually parse charmap
+		f.enc = f.buildEncoder()
+		if f.enc == nil {
+			f.enc = &nopEncoder{}
+		}
+	}
+	return f.enc
+}
+
+func (f *Font) buildEncoder() TextEncoding {
+	enc := f.Key("Encoding")
 	switch enc.Kind() {
 	case Name:
 		switch enc.Name() {
@@ -150,7 +188,7 @@ func (f Font) Encoder() TextEncoding {
 		case "Identity-H":
 			// ok, try ToUnicode
 		default:
-			println("unknown encoding", enc.Name())
+			f.logger("unknown encoding %s", enc.Name())
 			return &nopEncoder{}
 		}
 	case Dict:
@@ -158,11 +196,11 @@ func (f Font) Encoder() TextEncoding {
 	case Null:
 		// ok, try ToUnicode
 	default:
-		println("unexpected encoding", enc.String())
+		f.logger("unexpected encoding %s", enc.String())
 		return &nopEncoder{}
 	}
 
-	toUnicode := f.V.Key("ToUnicode")
+	toUnicode := f.Key("ToUnicode")
 	k := toUnicode.Kind()
 	if k == Dict || k == Stream {
 		m := readCmap(toUnicode)
@@ -236,11 +274,11 @@ func (e *byteEncoder) Decode(raw string) (text string) {
 type cmap struct {
 	space         [4][][2]string
 	bfrange       []bfrange
+	bfrangeExt    []bfrange
 	bfchar        map[int]string
 	bfcharKeySize int
 }
 
-// nolint: gocyclo
 func (m *cmap) Decode(raw string) (text string) {
 	var r []rune
 
@@ -252,36 +290,25 @@ func (m *cmap) Decode(raw string) (text string) {
 		return string(r)
 	}
 
+	bfranges := &m.bfrange
 Parse:
 	for len(raw) > 0 {
-		for n := 1; n <= 4 && n <= len(raw); n++ {
-			for _, space := range m.space[n-1] {
-				if space[0] <= raw[:n] && raw[:n] <= space[1] {
+		for n := 1; n <= 4 && n <= len(raw); n++ { // number of digits in character replacement (1-4 possible)
+			for _, space := range m.space[n-1] { // find matching codespace Ranges for number of digits
+				if space[0] <= raw[:n] && raw[:n] <= space[1] { // see if value is in range
 					text := raw[:n]
 					raw = raw[n:]
-					for _, bf := range m.bfrange {
-						if len(bf.lo) == n && bf.lo <= text && text <= bf.hi {
-							if bf.dst.Kind() == String {
-								s := bf.dst.RawString()
-								if bf.lo != text {
-									b := []byte(s)
-									b[len(b)-1] += text[len(text)-1] - bf.lo[len(bf.lo)-1]
-									s = string(b)
-								}
-								r = append(r, []rune(utf16Decode(s))...)
-								continue Parse
-							}
-							if bf.dst.Kind() == Array {
-								fmt.Printf("array %v\n", bf.dst)
-							} else {
-								fmt.Printf("unknown dst %v\n", bf.dst)
-							}
-							r = append(r, noRune)
-							continue Parse
-						}
+					runes := m.find(*bfranges, text, n)
+					if runes == nil && bfranges == &m.bfrange {
+						bfranges = &m.bfrangeExt
+						runes = m.find(*bfranges, text, n)
 					}
-					fmt.Printf("no text for %q", text)
-					r = append(r, noRune)
+					if runes == nil {
+						fmt.Printf("no text for %X\n", text)
+						r = append(r, noRune)
+					} else {
+						r = append(r, runes...)
+					}
 					continue Parse
 				}
 			}
@@ -293,6 +320,29 @@ Parse:
 	return string(r)
 }
 
+func (m *cmap) find(bfranges []bfrange, text string, sz int) []rune {
+	for _, bf := range bfranges { // check for matching bfrange
+		if len(bf.lo) == sz && bf.lo <= text && text <= bf.hi {
+			if bf.dst.Kind() == String {
+				s := bf.dst.RawString()
+				if bf.lo != text { // value isn't at the beginning of the range so scale result
+					b := []byte(s)
+					b[len(b)-1] += text[len(text)-1] - bf.lo[len(bf.lo)-1] // increment last byte by difference
+					s = string(b)
+				}
+				return []rune(utf16Decode(s))
+			}
+			if bf.dst.Kind() == Array {
+				fmt.Printf("array %v\n", bf.dst)
+			} else {
+				fmt.Printf("unknown dst %v\n", bf.dst)
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
 type bfrange struct {
 	lo  string
 	hi  string
@@ -301,6 +351,7 @@ type bfrange struct {
 
 // nolint: gocyclo
 func readCmap(toUnicode Value) TextEncoding {
+	//println("cmap")
 	n := -1
 	s := -1
 	var m cmap
@@ -366,6 +417,7 @@ func readCmap(toUnicode Value) TextEncoding {
 			if n < 0 {
 				panic("missing beginbfrange")
 			}
+			var bfranges []bfrange
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
 				if dst.Kind() == Array {
@@ -375,15 +427,47 @@ func readCmap(toUnicode Value) TextEncoding {
 					if h-l+1 <= dst.Len() {
 						for i := 0; i < dst.Len(); i++ {
 							idx := intToStr(l + i)
-							m.bfrange = append(m.bfrange, bfrange{idx, idx, dst.Index(i)})
+							bfranges = append(bfranges, bfrange{idx, idx, dst.Index(i)})
 						}
 					}
 					//fmt.Printf("%+v %+v\n", l, h)
 
 				} else {
-					m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
+					bfranges = append(bfranges, bfrange{srcLo, srcHi, dst})
 				}
 			}
+
+			sort.Slice(bfranges, func(i, j int) bool {
+				return bfranges[i].lo < bfranges[j].lo && bfranges[i].hi < bfranges[j].hi
+			})
+			m.bfrange = bfranges
+
+			out := []bfrange{bfranges[0]}
+			for i := 1; i < len(bfranges); i++ {
+				last := &out[len(out)-1]
+				cur := bfranges[i]
+
+				contiguous := last.lo == last.hi &&
+					cur.lo == cur.hi &&
+					strToInt(cur.lo)-strToInt(last.lo) == strToInt(cur.dst.RawString())-strToInt(last.dst.RawString())
+
+				if contiguous {
+					for j := strToInt(last.lo) + 1; j < strToInt(cur.lo); j++ {
+						idx := intToStr(j)
+						v := Value{obj: Object{Kind: String, StringVal: intToStr(int(last.dst.Int64() + int64(j)))}}
+						out = append(out, bfrange{idx, idx, v})
+					}
+					last.hi = cur.hi
+				}
+				out = append(out, cur)
+			}
+			/*
+				if len(out) != len(bfranges) {
+					for i, v := range out {
+						fmt.Printf("%d %X %X - %s\n", i, v.lo, v.hi, v.dst)
+					}
+				}*/
+			m.bfrangeExt = out
 
 		case "defineresource":
 			stk.Pop()
@@ -477,7 +561,7 @@ type gstate struct {
 }
 
 // Content returns the page's content.
-func (p Page) Content() Content {
+func (p *Page) Content() Content {
 	p.xobjects = make(map[string]struct{})
 	strm := p.Key("Contents")
 	response := p.contentStream(strm)
@@ -498,6 +582,11 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			result = Content{text, rect}
 		}
 	}()
+
+	// Handle in case the content page is empty
+	if p.IsNull() || p.Key("Contents").Kind() == Null {
+		return
+	}
 
 	var enc TextEncoding = &nopEncoder{}
 
@@ -663,10 +752,11 @@ func (p *Page) contentStream(strm Value) (result Content) {
 				panic("bad Tf")
 			}
 			f := args[0].Name()
+			p.logger("select font %s", f)
 			g.Tf = p.Font(f)
 			enc = g.Tf.Encoder()
 			if enc == nil {
-				println("no cmap for", f)
+				p.logger("no cmap for %s", f)
 				enc = &nopEncoder{}
 			}
 			g.Tfs = args[1].Float64()
@@ -688,10 +778,10 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			g.Tm = g.Tlm
 			fallthrough
 		case "Tj": // show text
-			if len(args) != 1 {
+			if len(args) != 1 || args[0].Kind() != String {
 				panic("bad Tj operator")
 			}
-			//p.logger("  Tj: %d %s", args[0].Kind(), args[0].RawString())
+			p.logger("  Tj:\n%s", hex.Dump([]byte(args[0].RawString())))
 			showText(args[0].RawString())
 
 		case "TJ": // show text, allowing individual glyph positioning
@@ -699,7 +789,7 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			for i := 0; i < v.Len(); i++ {
 				x := v.Index(i)
 				if x.Kind() == String {
-					//p.logger("  TJ: %x", x.RawString())
+					p.logger("  TJ: %x", x.RawString())
 					showText(x.RawString())
 				} else {
 					tx := -x.Float64() / 1000 * g.Tfs * g.Th

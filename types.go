@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // Kind represents the kind of value stored in an Object.
@@ -53,6 +55,61 @@ func (o *Object) MatchName(val string) bool {
 
 func (o *Object) MatchString(val string) bool {
 	return o.Kind == String && o.KeywordVal == val
+}
+
+// nolint: gocyclo
+func (o *Object) String(args ...int) string {
+	tab := 1
+	if len(args) > 0 {
+		tab = args[0]
+	}
+	tabStr := fmt.Sprintf("%*.*s", tab*2, tab*2, " ")
+	sb := strings.Builder{}
+
+	switch o.Kind {
+	case Array:
+		if tab > 1 {
+			sb.WriteString("\n")
+		}
+		for k, v := range o.ArrayVal {
+			sb.WriteString(tabStr)
+			sb.WriteString(tabStr)
+			sb.WriteString("[")
+			sb.WriteString(strconv.Itoa(k))
+			sb.WriteString("]: ")
+			sb.WriteString(v.String(tab + 1))
+			if v.Kind == Array || v.Kind == Dict {
+				sb.WriteString("\n")
+			}
+		}
+	case Bool:
+		fmt.Fprintf(&sb, "%sbool: %v", tabStr, o.BoolVal)
+	case Dict:
+		sb.WriteString("{\n")
+		for k, v := range o.DictVal {
+			sb.WriteString(tabStr)
+			sb.WriteString(tabStr)
+			sb.WriteString(k)
+			sb.WriteString(": ")
+			s := v.String(tab + 1)
+			sb.WriteString(s)
+		}
+		sb.WriteString("}\n")
+	case Indirect:
+		fmt.Fprintf(&sb, "%d %d R\n", o.PtrVal.id, o.PtrVal.gen)
+	case Integer:
+		fmt.Fprintf(&sb, "%d\n", o.Int64Val)
+	case Keyword:
+		fmt.Fprintf(&sb, "keyword: \"%s\"\n", o.KeywordVal)
+	case Name:
+		fmt.Fprintf(&sb, "%s\n", o.NameVal)
+	case Real:
+		fmt.Fprintf(&sb, "%f\n", o.Float64Val)
+	case String:
+		fmt.Fprintf(&sb, "\"%s\"\n", o.StringVal)
+	}
+
+	return sb.String()
 }
 
 // Internal types

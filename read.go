@@ -13,6 +13,7 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/ascii85"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -50,6 +51,9 @@ type Reader struct {
 	// Cache for object streams to avoid re-parsing
 	objStreamCache   map[uint32]map[int64]int64
 	objStreamCacheMu sync.RWMutex
+
+	fontCache map[string]Font
+	fontMutex sync.Mutex
 }
 
 type ReaderXrefInformation struct {
@@ -273,6 +277,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		objCache:        make(map[uint32]Value),
 		cacheCap:        2000,
 		objStreamCache:  make(map[uint32]map[int64]int64),
+		fontCache:       make(map[string]Font),
 	}
 	if c, ok := f.(io.Closer); ok {
 		r.closer = c
@@ -351,6 +356,23 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		r.trailerptr = trailerptr
 	}
 
+	/*
+		// Dump XRef
+		fmt.Printf("xrefs =================\n")
+		for _, v := range xref {
+			fmt.Printf("%d: ", v.ptr.id)
+			if v.stream.id > 0 {
+				fmt.Printf("(stm %d) ", v.stream.id)
+			}
+			fmt.Printf("%d\n", v.offset)
+		}
+		fmt.Printf("=======================\n")
+
+		defer func() {
+			fmt.Printf("trailer ===============\n%s", r.trailer.String())
+			fmt.Printf("=======================\n")
+		}()
+	*/
 	if trailer.Kind == Dict && trailer.DictVal["Encrypt"].Kind == Null {
 		return r, nil
 	}
@@ -1485,25 +1507,41 @@ func newStreamReader(s Object, r *Reader) io.ReadCloser {
 		}
 	}
 
-	return io.NopCloser(rd)
+	data, err := io.ReadAll(rd)
+	if err != nil {
+		return &errorReadCloser{err}
+	}
+	r.logger("stm:\n%s\n", hex.Dump(data))
+
+	return io.NopCloser(bytes.NewBuffer(data))
 }
 
 func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
 	switch name {
 	default:
 		return nil, fmt.Errorf("unknown filter %s", name)
-	// Used for JPEG; no need to decode
-	case "DCTDecode":
+	case "ASCIIHexDecode":
+		return asciiHexReader{rd}, nil
+	case "ASCII85Decode":
+		return ascii85.NewDecoder(rd), nil
+	case "CCITTFaxDecode":
+		// CCITT Group 3/4 data is left as-is for callers that understand the encoding.
 		return rd, nil
+	case "DCTDecode":
+		// Used for JPEG; no need to decode
+		return rd, nil
+	case "FlateDecode":
+		zr, err := zlib.NewReader(rd)
+		if err != nil {
+			return nil, err
+		}
+		return applyPredictor(zr, param)
 	case "JBIG2Decode":
 		fmt.Println("Warning: JBIG2 image detected, not supported yet, some images will not be saved correctly!")
 		// TODO: create a reader based on page 31 of PDF spec
 		return rd, nil
-	// Used for JPEG2000; no need to decode
 	case "JPXDecode":
-		return rd, nil
-	case "CCITTFaxDecode":
-		// CCITT Group 3/4 data is left as-is for callers that understand the encoding.
+		// Used for JPEG2000; no need to decode
 		return rd, nil
 	case "LZWDecode":
 		early := param.Key("EarlyChange")
@@ -1513,16 +1551,6 @@ func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
 		}
 		lr := lzw.NewReader(rd, lzw.MSB, 8)
 		return applyPredictor(lr, param)
-	case "ASCIIHexDecode":
-		return asciiHexReader{rd}, nil
-	case "ASCII85Decode":
-		return ascii85.NewDecoder(rd), nil
-	case "FlateDecode":
-		zr, err := zlib.NewReader(rd)
-		if err != nil {
-			return nil, err
-		}
-		return applyPredictor(zr, param)
 	}
 }
 

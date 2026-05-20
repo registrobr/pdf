@@ -60,7 +60,7 @@ func TestFontMethods(t *testing.T) {
 	v.DictVal["LastChar"] = Object{Kind: Integer, Int64Val: 126}
 	v.DictVal["Widths"] = Object{Kind: Array, ArrayVal: []Object{}}
 
-	f := Font{V: Value{obj: v}}
+	f := Font{Value: Value{obj: v}}
 	if f.BaseFont() != "Helvetica" {
 		t.Errorf("BaseFont mismatch: %q", f.BaseFont())
 	}
@@ -260,7 +260,7 @@ func TestFontWidth(t *testing.T) {
 			{Kind: Integer, Int64Val: 278},
 		}},
 	}}
-	f := Font{V: Value{obj: v}}
+	f := Font{Value: Value{obj: v}}
 
 	if f.Width(32) != 278 {
 		t.Errorf("expected 278, got %f", f.Width(32))
@@ -283,7 +283,7 @@ func TestEncoders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := Font{V: Value{obj: Object{Kind: Dict, DictVal: map[string]Object{
+			f := Font{Value: Value{obj: Object{Kind: Dict, DictVal: map[string]Object{
 				"Encoding": {Kind: Name, NameVal: tt.encoding},
 			}}}}
 			enc := f.Encoder()
@@ -303,7 +303,7 @@ func TestFontWidths(t *testing.T) {
 			{Kind: Integer, Int64Val: 200},
 		}},
 	}}
-	f := Font{V: Value{obj: v}}
+	f := Font{Value: Value{obj: v}}
 	widths := f.Widths()
 	if len(widths) != 2 || widths[0] != 100 || widths[1] != 200 {
 		t.Errorf("Widths() mismatch: %v", widths)

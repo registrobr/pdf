@@ -829,7 +829,8 @@ func (b *buffer) readDict() Object {
 	case '\n':
 		// ok
 	default:
-		b.errorf("stream keyword not followed by newline")
+		// Some corrupted PDFs lack newline after stream, tolerate and fall back one byte to treat it as data start
+		b.unreadByte()
 	}
 
 	return Object{
