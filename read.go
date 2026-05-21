@@ -13,7 +13,6 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/ascii85"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1286,7 +1285,7 @@ func objfmt(x Object) string {
 func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 	defer func() {
 		if e := recover(); e != nil {
-			v = Value{err: fmt.Errorf("panic resolving %v: %v", x, e)}
+			v = Value{err: fmt.Errorf("panic resolving %+v: %+v", x, e)}
 		}
 	}()
 
@@ -1378,7 +1377,7 @@ func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 						off := b.readToken().Int64Val
 
 						if uint32(id) == ptr.id {
-							b.seekForward(first + off)
+							offset = first + off
 							found = true
 							break
 						}
@@ -1390,8 +1389,8 @@ func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 					defer bufferPool.Put(b)
 					b.seekForward(offset)
 					x = b.readObject()
-					val := r.createValue(parent, x)
-					r.objCache[ptr.id] = val
+					//val := r.createValue(ptr, x)
+					//r.objCache[ptr.id] = val
 					break Search
 				}
 
@@ -1430,15 +1429,14 @@ func (r *Reader) resolve(parent Objptr, x Object) (v Value) {
 			}
 			x = obj
 		}
-		parent = ptr
 
 		// Cache the resolved value
-		val := r.createValue(parent, x)
+		val := Value{r: r, ptr: ptr, obj: x}
 		r.objCache[ptr.id] = val
 		return val
 	}
 
-	return r.createValue(parent, x)
+	return Value{r: r, ptr: parent, obj: x}
 }
 
 // Close closes the Reader and the underlying file if it implements io.Closer.
@@ -1447,10 +1445,6 @@ func (r *Reader) Close() error {
 		return r.closer.Close()
 	}
 	return nil
-}
-
-func (r *Reader) createValue(ptr Objptr, obj Object) Value {
-	return Value{r: r, ptr: ptr, obj: obj}
 }
 
 type errorReadCloser struct {
@@ -1509,9 +1503,11 @@ func newStreamReader(s Object, r *Reader) io.ReadCloser {
 
 	data, err := io.ReadAll(rd)
 	if err != nil {
+		r.logger(err.Error())
 		return &errorReadCloser{err}
 	}
-	r.logger("stm:\n%s\n", hex.Dump(data))
+	//r.logger("stm")
+	//hexdump(r.logger, data)
 
 	return io.NopCloser(bytes.NewBuffer(data))
 }
@@ -1523,7 +1519,17 @@ func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
 	case "ASCIIHexDecode":
 		return asciiHexReader{rd}, nil
 	case "ASCII85Decode":
-		return ascii85.NewDecoder(rd), nil
+		cleanASCII85 := newAlphaReader(rd)
+		decoder := ascii85.NewDecoder(cleanASCII85)
+
+		switch param.Keys() {
+		default:
+			fmt.Println("param=", param)
+			// Unexpected DecodeParms, but continue with decoder
+			return decoder, nil
+		case nil:
+			return decoder, nil
+		}
 	case "CCITTFaxDecode":
 		// CCITT Group 3/4 data is left as-is for callers that understand the encoding.
 		return rd, nil

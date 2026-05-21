@@ -5,7 +5,6 @@
 package pdf
 
 import (
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -111,7 +110,11 @@ func (p *Page) Font(name string) Font {
 			}
 		}
 	}
-	response := Font{v, p.r, nil}
+	response := Font{
+		Value:  v,
+		Reader: p.r,
+		name:   name,
+	}
 	response.Encoder()
 	p.r.fontCache[name] = response
 	return response
@@ -122,7 +125,8 @@ func (p *Page) Font(name string) Font {
 type Font struct {
 	Value
 	*Reader
-	enc TextEncoding
+	name string
+	enc  TextEncoding
 }
 
 // BaseFont returns the font's name (BaseFont property).
@@ -170,6 +174,7 @@ func (f *Font) Encoder() TextEncoding {
 	if f.enc == nil { // caching the Encoder so we don't have to continually parse charmap
 		f.enc = f.buildEncoder()
 		if f.enc == nil {
+			f.logger("no cmap for %s", f.name)
 			f.enc = &nopEncoder{}
 		}
 	}
@@ -273,6 +278,7 @@ func (e *byteEncoder) Decode(raw string) (text string) {
 
 type cmap struct {
 	space         [4][][2]string
+	bfrangeCur    *[]bfrange
 	bfrange       []bfrange
 	bfrangeExt    []bfrange
 	bfchar        map[int]string
@@ -290,7 +296,6 @@ func (m *cmap) Decode(raw string) (text string) {
 		return string(r)
 	}
 
-	bfranges := &m.bfrange
 Parse:
 	for len(raw) > 0 {
 		for n := 1; n <= 4 && n <= len(raw); n++ { // number of digits in character replacement (1-4 possible)
@@ -298,10 +303,10 @@ Parse:
 				if space[0] <= raw[:n] && raw[:n] <= space[1] { // see if value is in range
 					text := raw[:n]
 					raw = raw[n:]
-					runes := m.find(*bfranges, text, n)
-					if runes == nil && bfranges == &m.bfrange {
-						bfranges = &m.bfrangeExt
-						runes = m.find(*bfranges, text, n)
+					runes := m.find(text, n)
+					if runes == nil && m.bfrangeCur == &m.bfrange {
+						m.bfrangeCur = &m.bfrangeExt
+						runes = m.find(text, n)
 					}
 					if runes == nil {
 						fmt.Printf("no text for %X\n", text)
@@ -320,26 +325,64 @@ Parse:
 	return string(r)
 }
 
-func (m *cmap) find(bfranges []bfrange, text string, sz int) []rune {
-	for _, bf := range bfranges { // check for matching bfrange
-		if len(bf.lo) == sz && bf.lo <= text && text <= bf.hi {
-			if bf.dst.Kind() == String {
-				s := bf.dst.RawString()
-				if bf.lo != text { // value isn't at the beginning of the range so scale result
-					b := []byte(s)
-					b[len(b)-1] += text[len(text)-1] - bf.lo[len(bf.lo)-1] // increment last byte by difference
-					s = string(b)
-				}
-				return []rune(utf16Decode(s))
-			}
-			if bf.dst.Kind() == Array {
-				fmt.Printf("array %v\n", bf.dst)
-			} else {
-				fmt.Printf("unknown dst %v\n", bf.dst)
-			}
-			return nil
+func (m *cmap) find(text string, sz int) []rune {
+	bfranges := *m.bfrangeCur
+	// Find first range whose hi >= text
+	i := sort.Search(len(bfranges), func(i int) bool {
+		bf := bfranges[i]
+
+		// Skip smaller sizes
+		if len(bf.hi) < sz {
+			return false
 		}
+
+		// Larger sizes are considered >=
+		if len(bf.hi) > sz {
+			return true
+		}
+
+		return bf.hi >= text
+	})
+
+	if i >= len(bfranges) {
+		return nil
 	}
+
+	bf := bfranges[i]
+
+	// Validate actual match
+	if len(bf.lo) != sz || bf.lo > text || text > bf.hi {
+		return nil
+	}
+
+	switch bf.dst.Kind() {
+	case String:
+		s := bf.dst.RawString()
+
+		if bf.lo != text {
+			b := []byte(s)
+
+			// Increment from end (supports carry)
+			diff := int(text[len(text)-1]) - int(bf.lo[len(bf.lo)-1])
+
+			for j := len(b) - 1; j >= 0 && diff > 0; j-- {
+				v := int(b[j]) + diff
+				b[j] = byte(v & 0xff)
+				diff = v >> 8
+			}
+
+			s = string(b)
+		}
+
+		return []rune(utf16Decode(s))
+
+	case Array:
+		fmt.Printf("array %v\n", bf.dst)
+
+	default:
+		fmt.Printf("unknown dst %v\n", bf.dst)
+	}
+
 	return nil
 }
 
@@ -355,6 +398,8 @@ func readCmap(toUnicode Value) TextEncoding {
 	n := -1
 	s := -1
 	var m cmap
+	m.bfrangeCur = &m.bfrange
+
 	ok := true
 	Interpret(toUnicode, func(stk *Stack, op string) {
 		if !ok {
@@ -437,14 +482,14 @@ func readCmap(toUnicode Value) TextEncoding {
 				}
 			}
 
-			sort.Slice(bfranges, func(i, j int) bool {
-				return bfranges[i].lo < bfranges[j].lo && bfranges[i].hi < bfranges[j].hi
-			})
+			sortRanges(bfranges)
 			m.bfrange = bfranges
 
-			out := []bfrange{bfranges[0]}
+			// build an extended charmap
+			// fill gaps between two contiguous entries
+			ext := []bfrange{bfranges[0]}
 			for i := 1; i < len(bfranges); i++ {
-				last := &out[len(out)-1]
+				last := &ext[len(ext)-1]
 				cur := bfranges[i]
 
 				contiguous := last.lo == last.hi &&
@@ -452,22 +497,34 @@ func readCmap(toUnicode Value) TextEncoding {
 					strToInt(cur.lo)-strToInt(last.lo) == strToInt(cur.dst.RawString())-strToInt(last.dst.RawString())
 
 				if contiguous {
+					offset := 1
 					for j := strToInt(last.lo) + 1; j < strToInt(cur.lo); j++ {
 						idx := intToStr(j)
-						v := Value{obj: Object{Kind: String, StringVal: intToStr(int(last.dst.Int64() + int64(j)))}}
-						out = append(out, bfrange{idx, idx, v})
+						v := Value{obj: Object{Kind: String, StringVal: intToStr(strToInt(last.dst.RawString()) + offset)}}
+						offset++
+						ext = append(ext, bfrange{idx, idx, v})
 					}
-					last.hi = cur.hi
 				}
-				out = append(out, cur)
+				ext = append(ext, cur)
 			}
-			/*
-				if len(out) != len(bfranges) {
-					for i, v := range out {
-						fmt.Printf("%d %X %X - %s\n", i, v.lo, v.hi, v.dst)
-					}
-				}*/
-			m.bfrangeExt = out
+
+			// extend up to 0xff
+			last := &ext[len(ext)-1]
+			lastIdx := strToInt(last.lo)
+			offset := 1
+			for range 0xff - max(lastIdx, strToInt(last.dst.RawString())) {
+				idx := intToStr(lastIdx + offset)
+				v := Value{obj: Object{Kind: String, StringVal: intToStr(strToInt(last.dst.RawString()) + offset)}}
+				offset++
+				ext = append(ext, bfrange{idx, idx, v})
+			}
+
+			// if len(ext) != len(bfranges) {
+			// 	for i, v := range ext {
+			// 		fmt.Printf("%d %X %X - %s\n", i, v.lo, v.hi, v.dst)
+			// 	}
+			// }
+			m.bfrangeExt = ext
 
 		case "defineresource":
 			stk.Pop()
@@ -485,6 +542,20 @@ func readCmap(toUnicode Value) TextEncoding {
 	return &m
 }
 
+func sortRanges(bfranges []bfrange) {
+	sort.Slice(bfranges, func(i, j int) bool {
+		if len(bfranges[i].lo) != len(bfranges[j].lo) {
+			return len(bfranges[i].lo) < len(bfranges[j].lo)
+		}
+
+		if bfranges[i].lo != bfranges[j].lo {
+			return bfranges[i].lo < bfranges[j].lo
+		}
+
+		return bfranges[i].hi < bfranges[j].hi
+	})
+}
+
 func strToInt(s string) int {
 	b := []byte(s)
 	if len(b) > 1 {
@@ -496,10 +567,10 @@ func strToInt(s string) int {
 }
 
 func intToStr(i int) string {
-	var b []byte
-	b = append(b, byte(i>>8%0xff))
-	b = append(b, byte(i%0xff))
-	return string(b)
+	return string([]byte{
+		byte((i >> 8) & 0xff),
+		byte(i & 0xff),
+	})
 }
 
 type matrix [3][3]float64
@@ -597,6 +668,7 @@ func (p *Page) contentStream(strm Value) (result Content) {
 
 	showText := func(s string) {
 		n := 0
+		var part []Text
 		for _, ch := range enc.Decode(s) {
 			Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
 			var w0 float64
@@ -611,7 +683,7 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			if i := strings.Index(f, "+"); i >= 0 {
 				f = f[i+1:]
 			}
-			text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
+			part = append(part, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
 			//}
 			//p.logger("%f %f", text[len(text)-1].X, text[len(text)-1].Y)
 			tx := w0/1000*g.Tfs + g.Tc
@@ -621,6 +693,16 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			tx *= g.Th
 			g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
 		}
+
+		/*
+			hexdump(p.logger, []byte(s))
+			sb := bytes.Buffer{}
+			for _, p := range part {
+				sb.WriteString(p.S)
+			}
+			hexdump(p.logger, sb.Bytes())
+		*/
+		text = append(text, part...)
 	}
 
 	var gstack []gstate
@@ -751,14 +833,8 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			if len(args) != 2 {
 				panic("bad Tf")
 			}
-			f := args[0].Name()
-			p.logger("select font %s", f)
-			g.Tf = p.Font(f)
+			g.Tf = p.Font(args[0].Name())
 			enc = g.Tf.Encoder()
-			if enc == nil {
-				p.logger("no cmap for %s", f)
-				enc = &nopEncoder{}
-			}
 			g.Tfs = args[1].Float64()
 
 		case "\"": // set spacing, move to next line, and show text
@@ -781,7 +857,8 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			if len(args) != 1 || args[0].Kind() != String {
 				panic("bad Tj operator")
 			}
-			p.logger("  Tj:\n%s", hex.Dump([]byte(args[0].RawString())))
+			//p.logger("  Tj:")
+			//hexdump(p.logger, []byte(args[0].RawString()))
 			showText(args[0].RawString())
 
 		case "TJ": // show text, allowing individual glyph positioning
@@ -789,7 +866,8 @@ func (p *Page) contentStream(strm Value) (result Content) {
 			for i := 0; i < v.Len(); i++ {
 				x := v.Index(i)
 				if x.Kind() == String {
-					p.logger("  TJ: %x", x.RawString())
+					//p.logger("  TJ: %x", x.RawString())
+					//hexdump(p.logger, []byte(x.RawString()))
 					showText(x.RawString())
 				} else {
 					tx := -x.Float64() / 1000 * g.Tfs * g.Th

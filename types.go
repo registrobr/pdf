@@ -217,21 +217,26 @@ func (v Value) Reader() io.ReadCloser {
 	if v.err != nil {
 		return &errorReadCloser{v.err}
 	}
-	if v.obj.Kind == Array {
+
+	switch v.obj.Kind {
+	case Array:
 		var sb bytes.Buffer
 		for i := 0; i < v.Len(); i++ {
-			r := newStreamReader(v.Index(i).obj, v.r)
-			if b, err := io.ReadAll(r); err == nil {
-				sb.Write(b)
-			} else {
-				return &errorReadCloser{err}
+			o := v.Index(i).obj
+			if o.Kind == Stream {
+				r := newStreamReader(o, v.r)
+				if b, err := io.ReadAll(r); err == nil {
+					sb.Write(b)
+				} else {
+					return &errorReadCloser{err}
+				}
 			}
 		}
 		return io.NopCloser(&sb)
-	}
-	if v.obj.Kind == Stream {
+	case Stream:
 		return newStreamReader(v.obj, v.r)
 	}
+
 	return &errorReadCloser{fmt.Errorf("stream not present")}
 }
 
@@ -342,7 +347,7 @@ func (v Value) Header() Value {
 			Kind:    Dict,
 			DictVal: v.obj.DictVal,
 		}
-		return v.r.createValue(Objptr{}, hdrObj)
+		return Value{r: v.r, ptr: Objptr{}, obj: hdrObj}
 	}
 	return Value{}
 }

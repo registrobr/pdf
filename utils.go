@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 )
@@ -85,4 +86,37 @@ func ParseMetaInfo(value Value) map[string]string {
 	response := make(map[string]string)
 	parseMetaInfoKernel(0, "", value, response)
 	return response
+}
+
+func hexdump(logger LoggerFunc, b []byte) {
+	tab := 4
+	td := max(int(math.Log10(float64(len(b))))+1, tab)
+	cols := 16
+	l := len(b)
+	sb := strings.Builder{}
+	line := strings.Builder{}
+	for offset := range l {
+		if offset%cols == 0 && line.Len() > 0 {
+			fmt.Fprintf(&sb, "  %s\n", line.String())
+			line.Reset()
+		}
+		if line.Len() == 0 {
+			fmt.Fprintf(&sb, "%0*d (%0*x) - ", td, offset, tab, offset)
+		}
+		ch := b[offset]
+		fmt.Fprintf(&sb, "%02x ", ch)
+		if ch < 32 || ch >= 127 {
+			line.WriteByte('.')
+		} else {
+			line.WriteByte(ch)
+		}
+	}
+	if line.Len() > 0 {
+		for range cols - line.Len() {
+			sb.WriteString("   ")
+		}
+		fmt.Fprintf(&sb, "  %s", line.String())
+	}
+	sb.WriteString("\n")
+	logger(sb.String())
 }
