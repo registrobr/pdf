@@ -431,7 +431,11 @@ func readCmap(toUnicode Value) TextEncoding {
 				ok = false
 				return
 			}
-			m.bfchar = make(map[int]string)
+
+			if m.bfchar == nil {
+				m.bfchar = make(map[int]string)
+			}
+
 			for i := 0; i < s; i++ {
 				hiStr, loStr := stk.Pop().RawString(), stk.Pop().RawString()
 				if len(loStr) > 2 || len(hiStr) > 2 {
