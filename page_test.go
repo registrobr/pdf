@@ -222,10 +222,13 @@ func TestReadCmap(t *testing.T) {
 	// Simple CMap: 16-bit to 16-bit mapping
 	data := []byte(`
 1 begincodespacerange
-  <0041> <0041>
+  <0041> <0042>
 endcodespacerange
 1 beginbfrange
   <0041> <0041> <0042>
+endbfrange
+6 beginbfrange
+  <0042> <0042> <0043>
 endbfrange
 `) // A -> B
 	r := &Reader{f: bytes.NewReader(data)}
@@ -246,6 +249,10 @@ endbfrange
 	decoded := cmap.Decode("\x00\x41")
 	if decoded != "B" {
 		t.Errorf("expected B, got %q", decoded)
+	}
+	decoded = cmap.Decode("\x00\x42")
+	if decoded != "C" {
+		t.Errorf("expected C, got %q", decoded)
 	}
 }
 

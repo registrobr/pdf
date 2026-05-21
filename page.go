@@ -129,6 +129,8 @@ type Font struct {
 	enc  TextEncoding
 }
 
+var nopFont = Font{Reader: &Reader{logger: func(string, ...any) {}}}
+
 // BaseFont returns the font's name (BaseFont property).
 func (f Font) BaseFont() string {
 	return f.Key("BaseFont").Name()
@@ -211,6 +213,8 @@ func (f *Font) buildEncoder() TextEncoding {
 		m := readCmap(toUnicode)
 		if m == nil {
 			return &nopEncoder{}
+		} else if cm, ok := m.(*cmap); ok {
+			cm.f = f
 		}
 		return m
 	}
@@ -283,6 +287,7 @@ type cmap struct {
 	bfrangeExt    []bfrange
 	bfchar        map[int]string
 	bfcharKeySize int
+	f             *Font
 }
 
 func (m *cmap) Decode(raw string) (text string) {
@@ -309,7 +314,7 @@ Parse:
 						runes = m.find(text, n)
 					}
 					if runes == nil {
-						fmt.Printf("no text for %X\n", text)
+						m.f.logger("%s: no text for %X", m.f.name, text)
 						r = append(r, noRune)
 					} else {
 						r = append(r, runes...)
@@ -318,7 +323,7 @@ Parse:
 				}
 			}
 		}
-		println("no code space found")
+		m.f.logger("%s: no code space found", m.f.name)
 		r = append(r, noRune)
 		raw = raw[1:]
 	}
@@ -394,13 +399,16 @@ type bfrange struct {
 
 // nolint: gocyclo
 func readCmap(toUnicode Value) TextEncoding {
-	//println("cmap")
 	n := -1
 	s := -1
-	var m cmap
+	m := cmap{
+		f: &nopFont,
+	}
 	m.bfrangeCur = &m.bfrange
 
 	ok := true
+	var bfranges []bfrange
+
 	Interpret(toUnicode, func(stk *Stack, op string) {
 		if !ok {
 			return
@@ -462,7 +470,6 @@ func readCmap(toUnicode Value) TextEncoding {
 			if n < 0 {
 				panic("missing beginbfrange")
 			}
-			var bfranges []bfrange
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
 				if dst.Kind() == Array {
@@ -482,50 +489,6 @@ func readCmap(toUnicode Value) TextEncoding {
 				}
 			}
 
-			sortRanges(bfranges)
-			m.bfrange = bfranges
-
-			// build an extended charmap
-			// fill gaps between two contiguous entries
-			ext := []bfrange{bfranges[0]}
-			for i := 1; i < len(bfranges); i++ {
-				last := &ext[len(ext)-1]
-				cur := bfranges[i]
-
-				contiguous := last.lo == last.hi &&
-					cur.lo == cur.hi &&
-					strToInt(cur.lo)-strToInt(last.lo) == strToInt(cur.dst.RawString())-strToInt(last.dst.RawString())
-
-				if contiguous {
-					offset := 1
-					for j := strToInt(last.lo) + 1; j < strToInt(cur.lo); j++ {
-						idx := intToStr(j)
-						v := Value{obj: Object{Kind: String, StringVal: intToStr(strToInt(last.dst.RawString()) + offset)}}
-						offset++
-						ext = append(ext, bfrange{idx, idx, v})
-					}
-				}
-				ext = append(ext, cur)
-			}
-
-			// extend up to 0xff
-			last := &ext[len(ext)-1]
-			lastIdx := strToInt(last.lo)
-			offset := 1
-			for range 0xff - max(lastIdx, strToInt(last.dst.RawString())) {
-				idx := intToStr(lastIdx + offset)
-				v := Value{obj: Object{Kind: String, StringVal: intToStr(strToInt(last.dst.RawString()) + offset)}}
-				offset++
-				ext = append(ext, bfrange{idx, idx, v})
-			}
-
-			// if len(ext) != len(bfranges) {
-			// 	for i, v := range ext {
-			// 		fmt.Printf("%d %X %X - %s\n", i, v.lo, v.hi, v.dst)
-			// 	}
-			// }
-			m.bfrangeExt = ext
-
 		case "defineresource":
 			stk.Pop()
 			value := stk.Pop()
@@ -538,6 +501,56 @@ func readCmap(toUnicode Value) TextEncoding {
 	})
 	if !ok {
 		return nil
+	}
+
+	if len(bfranges) > 0 {
+		sortRanges(bfranges)
+		m.bfrange = bfranges
+		// for i, v := range bfranges {
+		// 	fmt.Printf("%d %X %X - %s\n", i, v.lo, v.hi, v.dst)
+		// }
+		// fmt.Printf("============================\n")
+
+		// build an extended charmap
+		// fill gaps between two contiguous entries
+		ext := []bfrange{bfranges[0]}
+		for i := 1; i < len(bfranges); i++ {
+			last := &ext[len(ext)-1]
+			cur := bfranges[i]
+
+			contiguous := last.lo == last.hi &&
+				cur.lo == cur.hi &&
+				strToInt(cur.lo)-strToInt(last.lo) == strToInt(cur.dst.RawString())-strToInt(last.dst.RawString())
+
+			if contiguous {
+				offset := 1
+				for j := strToInt(last.lo) + 1; j < strToInt(cur.lo); j++ {
+					idx := intToStr(j)
+					v := Value{obj: Object{Kind: String, StringVal: intToStr(strToInt(last.dst.RawString()) + offset)}}
+					offset++
+					ext = append(ext, bfrange{idx, idx, v})
+				}
+			}
+			ext = append(ext, cur)
+		}
+
+		// extend up to 0xff
+		last := &ext[len(ext)-1]
+		lastIdx := strToInt(last.lo)
+		offset := 1
+		for range 0xff - max(lastIdx, strToInt(last.dst.RawString())) {
+			idx := intToStr(lastIdx + offset)
+			v := Value{obj: Object{Kind: String, StringVal: intToStr(strToInt(last.dst.RawString()) + offset)}}
+			offset++
+			ext = append(ext, bfrange{idx, idx, v})
+		}
+
+		// if len(ext) != len(bfranges) {
+		// 	for i, v := range ext {
+		// 		fmt.Printf("%d %X %X - %s\n", i, v.lo, v.hi, v.dst)
+		// 	}
+		// }
+		m.bfrangeExt = ext
 	}
 	return &m
 }
